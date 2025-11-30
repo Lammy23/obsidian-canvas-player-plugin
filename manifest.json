@@ -1,11 +1,10 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
+	"id": "obsidian-canvas-player",
+	"name": "Obsidian Canvas Player",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
-	"isDesktopOnly": false
+	"description": "A plugin for Obsidian that allows you to play canvas files.",
+	"author": "Olamikun Aluko",
+	"authorUrl": "https://github.com/Lammy23",
+	"fundingUrl": "https://obsidian.md/pricing"
 }
