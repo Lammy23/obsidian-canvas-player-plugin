@@ -74,6 +74,7 @@ If your plugin does not need CSS, delete this file.
 
 /* --- READER MODE STYLES (Keep these for the other mode) --- */
 .canvas-player-container { display: flex; flex-direction: column; height: 100%; padding: 10px; }
+.canvas-player-controls { display: flex; gap: 10px; margin-bottom: 10px; }
 .canvas-player-text { font-size: 1.2em; flex-grow: 1; overflow-y: auto; margin-bottom: 20px; }
 .canvas-player-choices { display: flex; flex-direction: column; gap: 10px; }
 
