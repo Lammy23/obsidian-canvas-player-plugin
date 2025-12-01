@@ -1,4 +1,4 @@
-import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile } from 'obsidian';
+import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu } from 'obsidian';
 
 // --- Interfaces ---
 interface CanvasNode {
@@ -79,6 +79,21 @@ export default class CanvasPlayerPlugin extends Plugin {
         });
 
         this.addSettingTab(new CanvasPlayerSettingTab(this.app, this));
+
+        // Register context menu for canvas nodes
+        // Note: canvas:node-menu is not in official types but is available in Obsidian
+        this.registerEvent(
+            (this.app.workspace as any).on('canvas:node-menu', (menu: Menu, node: any) => {
+                menu.addItem((item: any) => {
+                    item
+                        .setTitle('Play from here')
+                        .setIcon('play-circle')
+                        .onClick(async () => {
+                            await this.playFromNode(node);
+                        });
+                });
+            })
+        );
     }
 
     refreshCanvasViewActions() {
@@ -142,8 +157,54 @@ export default class CanvasPlayerPlugin extends Plugin {
 
         if (!startNode) return;
 
+        await this.playCanvasFromNode(activeFile, canvasData, startNode);
+    }
+
+    async playFromNode(contextNode: any) {
+        // Get the node ID from the context menu node
+        // The node structure may vary, so check multiple possible properties
+        const nodeId = contextNode?.id || contextNode?.node?.id || contextNode?.getData?.()?.id;
+        if (!nodeId) {
+            console.error('Canvas Player: Could not extract node ID from context node', contextNode);
+            new Notice('Could not identify the selected card.');
+            return;
+        }
+
+        // Get the active canvas file
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile || activeFile.extension !== 'canvas') {
+            new Notice('Please open a Canvas file first.');
+            return;
+        }
+
+        try {
+            // Load canvas data
+            const content = await this.app.vault.read(activeFile);
+            const canvasData: CanvasData = JSON.parse(content);
+
+            // Find the matching node in the canvas data
+            const matchingNode = canvasData.nodes.find(n => n.id === nodeId);
+            if (!matchingNode) {
+                new Notice('Could not find the selected card in the canvas.');
+                return;
+            }
+
+            // Only allow playing from text nodes
+            if (matchingNode.type !== 'text') {
+                new Notice('Can only play from text cards.');
+                return;
+            }
+
+            await this.playCanvasFromNode(activeFile, canvasData, matchingNode);
+        } catch (error) {
+            console.error('Canvas Player: failed to play from node', error);
+            new Notice('Unable to play from the selected card.');
+        }
+    }
+
+    async playCanvasFromNode(canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode) {
         if (this.settings.mode === 'modal') {
-            new CanvasPlayerModal(this, activeFile, canvasData, startNode).open();
+            new CanvasPlayerModal(this, canvasFile, canvasData, startNode).open();
         } else {
             this.startCameraMode(canvasData, startNode);
         }
