@@ -65,6 +65,19 @@ export default class CanvasPlayerPlugin extends Plugin {
             }
         });
 
+        this.addCommand({
+            id: 'zoom-canvas-to-start',
+            name: 'Zoom Canvas to Start',
+            checkCallback: (checking: boolean) => {
+                const activeFile = this.app.workspace.getActiveFile();
+                if (activeFile && activeFile.extension === 'canvas') {
+                    if (!checking) void this.zoomToStartOfActiveCanvas();
+                    return true;
+                }
+                return false;
+            }
+        });
+
         this.addSettingTab(new CanvasPlayerSettingTab(this.app, this));
     }
 
@@ -76,6 +89,9 @@ export default class CanvasPlayerPlugin extends Plugin {
                 if ((view as any)._hasCanvasPlayerButton) return;
                 view.addAction('play', 'Play Canvas', () => {
                     this.playActiveCanvas();
+                });
+                view.addAction('zoom-in', 'Zoom to start', () => {
+                    void this.zoomToStartOfActiveCanvas();
                 });
                 (view as any)._hasCanvasPlayerButton = true;
             }
@@ -130,6 +146,36 @@ export default class CanvasPlayerPlugin extends Plugin {
             new CanvasPlayerModal(this, activeFile, canvasData, startNode).open();
         } else {
             this.startCameraMode(canvasData, startNode);
+        }
+    }
+
+    async zoomToStartOfActiveCanvas() {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile || activeFile.extension !== 'canvas') {
+            new Notice('Please open a Canvas file first.');
+            return;
+        }
+
+        const view = this.app.workspace.getActiveViewOfType(ItemView);
+        if (!view || view.getViewType() !== 'canvas') {
+            new Notice('Please focus a Canvas view.');
+            return;
+        }
+
+        try {
+            const content = await this.app.vault.read(activeFile);
+            const canvasData: CanvasData = JSON.parse(content);
+            const startNode = this.getStartNode(canvasData);
+
+            if (!startNode) {
+                new Notice('Could not find a start card in this canvas.');
+                return;
+            }
+
+            this.zoomToNode(view, startNode);
+        } catch (error) {
+            console.error('Canvas Player: failed to zoom to start', error);
+            new Notice('Unable to zoom to start of this canvas.');
         }
     }
 
@@ -313,7 +359,7 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('Start card text')
-            .setDesc('Reader mode begins at the first text node whose content contains this string (case-insensitive).')
+            .setDesc('Reader mode and Zoom to start use the first text node whose content contains this string (case-insensitive).')
             .addText(text => text
                 .setPlaceholder('canvas-start')
                 .setValue(this.plugin.settings.startText)
