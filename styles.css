@@ -92,3 +92,22 @@ If your plugin does not need CSS, delete this file.
     background-color: rgba(0, 0, 0, 0.7) !important;
     opacity: 1 !important;
 }
+
+/* --- COMPLEXITY SCORE --- */
+.canvas-complexity-score {
+    font-family: var(--font-monospace);
+    font-size: 0.8em;
+    color: var(--text-muted);
+    margin-right: 10px;
+    padding: 2px 5px;
+    border-radius: 4px;
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    cursor: help;
+    user-select: none;
+}
+
+.canvas-complexity-score:hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-normal);
+}
