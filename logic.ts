@@ -71,5 +71,20 @@ export class LogicEngine {
             state[setOp.variable] = setOp.value;
         }
     }
+
+    /**
+     * Returns a list of variable names referenced in conditions that are not defined in the state.
+     */
+    static getMissingVariables(parsed: ParsedLabel, state: GameState): string[] {
+        const missing: string[] = [];
+        for (const condition of parsed.conditions) {
+            if (state[condition.variable] === undefined) {
+                if (!missing.includes(condition.variable)) {
+                    missing.push(condition.variable);
+                }
+            }
+        }
+        return missing;
+    }
 }
 

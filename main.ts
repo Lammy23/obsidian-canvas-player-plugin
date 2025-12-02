@@ -292,11 +292,48 @@ export default class CanvasPlayerPlugin extends Plugin {
 
         const rawChoices = data.edges.filter(edge => edge.fromNode === currentNode.id);
         
-        // Parse and filter choices based on state
-        const validChoices = rawChoices.map(edge => {
+        // 1. Pre-parse choices and check for missing variables
+        const parsedChoices = rawChoices.map(edge => {
             const parsed = LogicEngine.parseLabel(edge.label || "Next");
             return { edge, parsed };
-        }).filter(item => LogicEngine.checkConditions(item.parsed, this.currentSessionState));
+        });
+
+        const missingVars = new Set<string>();
+        parsedChoices.forEach(item => {
+            const missing = LogicEngine.getMissingVariables(item.parsed, this.currentSessionState);
+            missing.forEach(v => missingVars.add(v));
+        });
+
+        if (missingVars.size > 0) {
+            container.createEl('div', { text: 'Please set values for new variables:', cls: 'canvas-player-prompt-header' });
+            
+            missingVars.forEach(variable => {
+                // Default to false if not set
+                if (this.currentSessionState[variable] === undefined) {
+                    this.currentSessionState[variable] = false;
+                }
+
+                new Setting(container)
+                    .setName(variable)
+                    .addToggle(toggle => toggle
+                        .setValue(this.currentSessionState[variable])
+                        .onChange(val => {
+                            this.currentSessionState[variable] = val;
+                        }));
+            });
+
+            new ButtonComponent(container)
+                .setButtonText("Continue")
+                .setCta()
+                .onClick(() => {
+                    // Re-run render to process choices with updated state
+                    this.renderChoicesInHud(view, data, currentNode, container);
+                });
+            return;
+        }
+        
+        // 2. Filter choices based on state
+        const validChoices = parsedChoices.filter(item => LogicEngine.checkConditions(item.parsed, this.currentSessionState));
 
         if (validChoices.length === 0) {
             new ButtonComponent(container)
@@ -498,12 +535,45 @@ class CanvasPlayerModal extends Modal {
 
         const rawChoices = this.canvasData.edges.filter(edge => edge.fromNode === this.currentNode.id);
         
-        const validChoices = rawChoices.map(edge => {
+        // 1. Pre-parse and check for missing variables
+        const parsedChoices = rawChoices.map(edge => {
             const parsed = LogicEngine.parseLabel(edge.label || "Next");
             return { edge, parsed };
-        }).filter(item => LogicEngine.checkConditions(item.parsed, this.state));
+        });
+
+        const missingVars = new Set<string>();
+        parsedChoices.forEach(item => {
+            const missing = LogicEngine.getMissingVariables(item.parsed, this.state);
+            missing.forEach(v => missingVars.add(v));
+        });
 
         const buttonContainer = container.createDiv({ cls: 'canvas-player-choices' });
+
+        if (missingVars.size > 0) {
+            const promptContainer = container.createDiv({ cls: 'canvas-player-prompt' });
+            promptContainer.createEl('h3', { text: 'Set values for missing variables:' });
+
+            missingVars.forEach(variable => {
+                if (this.state[variable] === undefined) this.state[variable] = false;
+
+                new Setting(promptContainer)
+                    .setName(variable)
+                    .addToggle(toggle => toggle
+                        .setValue(this.state[variable])
+                        .onChange(val => this.state[variable] = val)
+                    );
+            });
+
+            new ButtonComponent(promptContainer)
+                .setButtonText("Continue")
+                .setCta()
+                .onClick(() => {
+                    this.renderScene();
+                });
+            return; // Stop rendering regular choices
+        }
+
+        const validChoices = parsedChoices.filter(item => LogicEngine.checkConditions(item.parsed, this.state));
 
         if (validChoices.length === 0) {
             new ButtonComponent(buttonContainer).setButtonText("End of Path").onClick(() => this.close());
