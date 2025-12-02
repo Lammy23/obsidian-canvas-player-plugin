@@ -12,22 +12,23 @@ export interface ComplexityWeights {
 export interface CanvasPlayerSettings {
     mode: 'modal' | 'camera';
     startText: string;
+    showComplexityScore: boolean;
     complexityWeights: ComplexityWeights;
 }
 
 export const DEFAULT_COMPLEXITY_WEIGHTS: ComplexityWeights = {
-    nodeCount: 0.1,
-    edgeCount: 0.1,
+    nodeCount: 4.0,
+    edgeCount: 3.1,
     cyclomaticComplexity: 1.5,
     branchingFactor: 1.0,
     logicDensity: 2.0,
-    variableCount: 0.5,
-    contentVolume: 0.01, // Assuming char count, this needs to be small
+    variableCount: 3.5,
+    contentVolume: 0.10, // Assuming char count, this needs to be small
 };
 
 export const DEFAULT_SETTINGS: CanvasPlayerSettings = {
     mode: 'modal',
     startText: 'canvas-start',
+    showComplexityScore: true,
     complexityWeights: DEFAULT_COMPLEXITY_WEIGHTS,
 };
-

@@ -88,26 +88,37 @@ export default class CanvasPlayerPlugin extends Plugin {
             if (leaf.view.getViewType() === 'canvas') {
                 const view = leaf.view as ItemView;
                 
-                // Inject Complexity Score
-                if (!this.scoreElements.has(view)) {
-                    // Find the view actions container
-                    const actionsContainer = view.headerEl.querySelector('.view-actions');
-                    if (actionsContainer) {
-                        const scoreEl = createDiv({ cls: 'canvas-complexity-score' });
-                        scoreEl.style.marginRight = '10px';
-                        scoreEl.style.fontSize = '0.8em';
-                        scoreEl.style.color = 'var(--text-muted)';
-                        scoreEl.style.alignSelf = 'center';
-                        
-                        // Prepend to actions container
-                        actionsContainer.insertBefore(scoreEl, actionsContainer.firstChild);
-                        this.scoreElements.set(view, scoreEl);
-                        
-                        // Initial update if file is loaded
-                        const file = view.file;
-                        if (file) {
-                            this.updateComplexityScore(file);
+                // Inject Complexity Score if enabled
+                if (this.settings.showComplexityScore) {
+                    if (!this.scoreElements.has(view)) {
+                        // Find the view actions container
+                        // @ts-ignore: headerEl is not in the public API but exists on ItemView
+                        const actionsContainer = view.headerEl.querySelector('.view-actions');
+                        if (actionsContainer) {
+                            const scoreEl = createDiv({ cls: 'canvas-complexity-score' });
+                            scoreEl.style.marginRight = '10px';
+                            scoreEl.style.fontSize = '0.8em';
+                            scoreEl.style.color = 'var(--text-muted)';
+                            scoreEl.style.alignSelf = 'center';
+                            
+                            // Prepend to actions container
+                            actionsContainer.insertBefore(scoreEl, actionsContainer.firstChild);
+                            this.scoreElements.set(view, scoreEl);
+                            
+                            // Initial update if file is loaded
+                            // @ts-ignore: file exists on ItemView but might be missing from type definition in some versions
+                            const file = view.file;
+                            if (file) {
+                                this.updateComplexityScore(file);
+                            }
                         }
+                    }
+                } else {
+                    // If disabled, remove any existing score elements
+                    const scoreEl = this.scoreElements.get(view);
+                    if (scoreEl) {
+                        scoreEl.remove();
+                        this.scoreElements.delete(view);
                     }
                 }
 
@@ -126,9 +137,11 @@ export default class CanvasPlayerPlugin extends Plugin {
     }
 
     async updateComplexityScore(file: TFile) {
+        if (!this.settings.showComplexityScore) return;
+
         // Only update for active canvas views showing this file
         this.app.workspace.iterateAllLeaves(async (leaf) => {
-            if (leaf.view.getViewType() === 'canvas' && leaf.view.file?.path === file.path) {
+            if (leaf.view.getViewType() === 'canvas' && (leaf.view as any).file?.path === file.path) {
                 const view = leaf.view as ItemView;
                 const scoreEl = this.scoreElements.get(view);
                 if (scoreEl) {
@@ -178,6 +191,9 @@ export default class CanvasPlayerPlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+        // Refresh UI based on new settings
+        this.refreshCanvasViewActions();
+        
         // Refresh scores when settings change
         const activeFile = this.app.workspace.getActiveFile();
         if (activeFile && activeFile.extension === 'canvas') {
@@ -512,6 +528,16 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.startText)
                 .onChange(async (value) => {
                     this.plugin.settings.startText = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Show complexity score')
+            .setDesc('Display the calculated complexity score in the canvas view header.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showComplexityScore)
+                .onChange(async (value) => {
+                    this.plugin.settings.showComplexityScore = value;
                     await this.plugin.saveSettings();
                 }));
 
