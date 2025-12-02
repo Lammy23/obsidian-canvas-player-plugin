@@ -1,94 +1,54 @@
-# Obsidian Sample Plugin
+# Obsidian Canvas Player
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+A plugin for [Obsidian](https://obsidian.md) that allows you to "play" your Canvas files as interactive text adventures or presentations.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+## Features
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open Sample Modal" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+-   **Play Mode**: Navigate through your canvas node by node.
+-   **Two Viewing Modes**:
+    -   **Reader Mode (Modal)**: Displays text in a focused popup window, similar to a text adventure game.
+    -   **Camera Mode**: Smoothly pans and zooms the canvas view to the active node, dimming the surroundings.
+-   **Variable State Management**: Create complex, branching narratives by tracking choices and variables.
+-   **Start Anywhere**: Play from the beginning or right-click any card to "Play from here".
 
-## First time developing plugins?
+## Usage
 
-Quick starting guide for new plugin devs:
+1.  Open a Canvas file.
+2.  Run the command **"Play Current Canvas"** (or click the "Play" button in the canvas header).
+3.  Follow the path! Click the buttons to choose your next step.
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+## Variable State Syntax
 
-## Releasing new releases
+You can add logic to your **connection labels** to set variables or show/hide paths based on previous choices. The syntax is hidden from the player during gameplay.
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+### Setting Variables
+Use `{set:variableName=value}` to update the game state when a user takes a path.
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+-   **Example**: `{set:hasKey=true} Pick up the key`
+    -   *Effect*: Sets the variable `hasKey` to `true` when clicked.
+    -   *Display*: The button will just say "Pick up the key".
 
-## Adding your plugin to the community plugin list
+### Checking Conditions
+Use `{if:variableName}` or `{if:!variableName}` to only show a path if a condition is met.
 
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
+-   **Example 1**: `{if:hasKey} Unlock the door`
+    -   *Effect*: This option only appears if `hasKey` is true.
+-   **Example 2**: `{if:!visitedRoom} Enter the dark cave`
+    -   *Effect*: This option only appears if `visitedRoom` is false (or undefined).
 
-## How to use
+### Explicit Values
+You can also check for explicit boolean values:
+-   `{if:status=true}`
+-   `{if:status=false}`
 
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
+## Installation
 
-## Manually installing the plugin
+1.  Download the latest release.
+2.  Extract the `main.js`, `manifest.json`, and `styles.css` files into your vault's `.obsidian/plugins/obsidian-canvas-player` folder.
+3.  Reload Obsidian and enable the plugin in Settings.
 
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
+## Development
 
-## Improve code quality with eslint (optional)
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- To use eslint with this project, make sure to install eslint from terminal:
-  - `npm install -g eslint`
-- To use eslint to analyze this project use this command:
-  - `eslint main.ts`
-  - eslint will then create a report with suggestions for code improvement by file and line number.
-- If your source code is in a folder, such as `src`, you can use eslint with this command to analyze all files in that folder:
-  - `eslint ./src/`
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
-```
-
-If you have multiple URLs, you can also do:
-
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
-```
-
-## API Documentation
-
-See https://github.com/obsidianmd/obsidian-api
+1.  Clone this repository.
+2.  Run `npm install` to install dependencies.
+3.  Run `npm run dev` to start compilation in watch mode.

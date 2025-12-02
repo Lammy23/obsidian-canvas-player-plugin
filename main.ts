@@ -1,4 +1,5 @@
 import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu } from 'obsidian';
+import { LogicEngine, GameState } from './logic';
 
 // --- Interfaces ---
 interface CanvasNode {
@@ -37,6 +38,7 @@ export default class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
     activeHud: HTMLElement | null = null; 
     activeOverlay: HTMLElement | null = null;
+    currentSessionState: GameState = {};
     private readonly actionableView = (view: ItemView): view is ItemView & {
         addAction(icon: string, title: string, callback: () => void): void;
     } => typeof (view as ItemView & { addAction?: unknown }).addAction === 'function';
@@ -245,6 +247,7 @@ export default class CanvasPlayerPlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(ItemView);
         if (!view || view.getViewType() !== 'canvas') return;
 
+        this.currentSessionState = {}; // Reset state for new session
         this.createHud(view, data, startNode);
         
         // Initial Move
@@ -287,9 +290,15 @@ export default class CanvasPlayerPlugin extends Plugin {
     renderChoicesInHud(view: ItemView, data: CanvasData, currentNode: CanvasNode, container: HTMLElement) {
         container.empty();
 
-        const choices = data.edges.filter(edge => edge.fromNode === currentNode.id);
+        const rawChoices = data.edges.filter(edge => edge.fromNode === currentNode.id);
+        
+        // Parse and filter choices based on state
+        const validChoices = rawChoices.map(edge => {
+            const parsed = LogicEngine.parseLabel(edge.label || "Next");
+            return { edge, parsed };
+        }).filter(item => LogicEngine.checkConditions(item.parsed, this.currentSessionState));
 
-        if (choices.length === 0) {
+        if (validChoices.length === 0) {
             new ButtonComponent(container)
                 .setButtonText("End of Path") 
                 .onClick(() => {
@@ -297,14 +306,17 @@ export default class CanvasPlayerPlugin extends Plugin {
                 })
                 .buttonEl.addClass('mod-cta');
         } else {
-            choices.forEach(edge => {
-                const nextNode = data.nodes.find(n => n.id === edge.toNode);
-                let label = edge.label || "Next";
+            validChoices.forEach(choice => {
+                const nextNode = data.nodes.find(n => n.id === choice.edge.toNode);
+                const label = choice.parsed.text || "Next";
 
                 new ButtonComponent(container)
                     .setButtonText(label)
                     .onClick(() => {
                         if (nextNode) {
+                            // Update state
+                            LogicEngine.updateState(choice.parsed, this.currentSessionState);
+
                             // 1. Remove spotlight (clear view for movement)
                             this.removeSpotlight();
                             
@@ -439,6 +451,7 @@ class CanvasPlayerModal extends Modal {
     private history: CanvasNode[] = [];
     private plugin: CanvasPlayerPlugin;
     private canvasFile: TFile;
+    private state: GameState = {};
 
     constructor(plugin: CanvasPlayerPlugin, canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode) {
         super(plugin.app);
@@ -483,17 +496,24 @@ class CanvasPlayerModal extends Modal {
             this as unknown as Component
         );
 
-        const choices = this.canvasData.edges.filter(edge => edge.fromNode === this.currentNode.id);
+        const rawChoices = this.canvasData.edges.filter(edge => edge.fromNode === this.currentNode.id);
+        
+        const validChoices = rawChoices.map(edge => {
+            const parsed = LogicEngine.parseLabel(edge.label || "Next");
+            return { edge, parsed };
+        }).filter(item => LogicEngine.checkConditions(item.parsed, this.state));
+
         const buttonContainer = container.createDiv({ cls: 'canvas-player-choices' });
 
-        if (choices.length === 0) {
+        if (validChoices.length === 0) {
             new ButtonComponent(buttonContainer).setButtonText("End of Path").onClick(() => this.close());
         } else {
-            choices.forEach(edge => {
-                const nextNode = this.canvasData.nodes.find(n => n.id === edge.toNode);
-                let lbl = edge.label || "Next";
+            validChoices.forEach(choice => {
+                const nextNode = this.canvasData.nodes.find(n => n.id === choice.edge.toNode);
+                const lbl = choice.parsed.text || "Next";
                 new ButtonComponent(buttonContainer).setButtonText(lbl).onClick(() => {
                     if (nextNode) {
+                        LogicEngine.updateState(choice.parsed, this.state);
                         this.history.push(this.currentNode);
                         this.currentNode = nextNode;
                         this.renderScene();
