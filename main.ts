@@ -1,44 +1,18 @@
-import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu } from 'obsidian';
+import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu, debounce } from 'obsidian';
 import { LogicEngine, GameState } from './logic';
-
-// --- Interfaces ---
-interface CanvasNode {
-    id: string;
-    text?: string;
-    type: string;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-}
-
-interface CanvasEdge {
-    id: string;
-    fromNode: string;
-    toNode: string;
-    label?: string;
-}
-
-interface CanvasData {
-    nodes: CanvasNode[];
-    edges: CanvasEdge[];
-}
-
-interface CanvasPlayerSettings {
-    mode: 'modal' | 'camera';
-    startText: string;
-}
-
-const DEFAULT_SETTINGS: CanvasPlayerSettings = {
-    mode: 'modal',
-    startText: 'canvas-start'
-}
+import { CanvasNode, CanvasData } from './types';
+import { CanvasPlayerSettings, DEFAULT_SETTINGS, DEFAULT_COMPLEXITY_WEIGHTS, ComplexityWeights } from './settings';
+import { ComplexityCalculator } from './complexity';
 
 export default class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
     activeHud: HTMLElement | null = null; 
     activeOverlay: HTMLElement | null = null;
     currentSessionState: GameState = {};
+    
+    // Map to track score elements per view
+    scoreElements: Map<ItemView, HTMLElement> = new Map();
+
     private readonly actionableView = (view: ItemView): view is ItemView & {
         addAction(icon: string, title: string, callback: () => void): void;
     } => typeof (view as ItemView & { addAction?: unknown }).addAction === 'function';
@@ -52,6 +26,17 @@ export default class CanvasPlayerPlugin extends Plugin {
 
         this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
             this.refreshCanvasViewActions();
+        }));
+        
+        // Update score when file changes
+        const debouncedUpdate = debounce((file: TFile) => {
+             this.updateComplexityScore(file);
+        }, 1000, true);
+
+        this.registerEvent(this.app.vault.on('modify', (file) => {
+            if (file instanceof TFile && file.extension === 'canvas') {
+                debouncedUpdate(file);
+            }
         }));
 
         this.addCommand({
@@ -102,6 +87,42 @@ export default class CanvasPlayerPlugin extends Plugin {
         this.app.workspace.iterateAllLeaves((leaf) => {
             if (leaf.view.getViewType() === 'canvas') {
                 const view = leaf.view as ItemView;
+                
+                // Inject Complexity Score if enabled
+                if (this.settings.showComplexityScore) {
+                    if (!this.scoreElements.has(view)) {
+                        // Find the view actions container
+                        // @ts-ignore: headerEl is not in the public API but exists on ItemView
+                        const actionsContainer = view.headerEl.querySelector('.view-actions');
+                        if (actionsContainer) {
+                            const scoreEl = createDiv({ cls: 'canvas-complexity-score' });
+                            scoreEl.style.marginRight = '10px';
+                            scoreEl.style.fontSize = '0.8em';
+                            scoreEl.style.color = 'var(--text-muted)';
+                            scoreEl.style.alignSelf = 'center';
+                            
+                            // Prepend to actions container
+                            actionsContainer.insertBefore(scoreEl, actionsContainer.firstChild);
+                            this.scoreElements.set(view, scoreEl);
+                            
+                            // Initial update if file is loaded
+                            // @ts-ignore: file exists on ItemView but might be missing from type definition in some versions
+                            const file = view.file;
+                            if (file) {
+                                this.updateComplexityScore(file);
+                            }
+                        }
+                    }
+                } else {
+                    // If disabled, remove any existing score elements
+                    const scoreEl = this.scoreElements.get(view);
+                    if (scoreEl) {
+                        scoreEl.remove();
+                        this.scoreElements.delete(view);
+                    }
+                }
+
+                // Add Player buttons
                 if (!this.actionableView(view)) return;
                 if ((view as any)._hasCanvasPlayerButton) return;
                 view.addAction('play', 'Play Canvas', () => {
@@ -111,6 +132,31 @@ export default class CanvasPlayerPlugin extends Plugin {
                     void this.zoomToStartOfActiveCanvas();
                 });
                 (view as any)._hasCanvasPlayerButton = true;
+            }
+        });
+    }
+
+    async updateComplexityScore(file: TFile) {
+        if (!this.settings.showComplexityScore) return;
+
+        // Only update for active canvas views showing this file
+        this.app.workspace.iterateAllLeaves(async (leaf) => {
+            if (leaf.view.getViewType() === 'canvas' && (leaf.view as any).file?.path === file.path) {
+                const view = leaf.view as ItemView;
+                const scoreEl = this.scoreElements.get(view);
+                if (scoreEl) {
+                    try {
+                        const content = await this.app.vault.read(file);
+                        const data: CanvasData = JSON.parse(content);
+                        const metrics = ComplexityCalculator.calculate(data);
+                        const score = ComplexityCalculator.computeScore(metrics, this.settings.complexityWeights);
+                        scoreEl.setText(`Complexity: ${score}`);
+                        scoreEl.title = `Nodes: ${metrics.nodeCount}\nEdges: ${metrics.edgeCount}\nCyclomatic: ${metrics.cyclomaticComplexity}\nBranching: ${metrics.branchingFactor.toFixed(2)}\nLogic Density: ${(metrics.logicDensity * 100).toFixed(0)}%\nVars: ${metrics.variableCount}\nVol: ${metrics.contentVolume}`;
+                    } catch (e) {
+                        console.error('Failed to calculate complexity', e);
+                        scoreEl.setText('Complexity: Err');
+                    }
+                }
             }
         });
     }
@@ -139,10 +185,20 @@ export default class CanvasPlayerPlugin extends Plugin {
 
     async loadSettings() {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        // Ensure nested objects are merged correctly
+        this.settings.complexityWeights = Object.assign({}, DEFAULT_COMPLEXITY_WEIGHTS, this.settings.complexityWeights);
     }
 
     async saveSettings() {
         await this.saveData(this.settings);
+        // Refresh UI based on new settings
+        this.refreshCanvasViewActions();
+        
+        // Refresh scores when settings change
+        const activeFile = this.app.workspace.getActiveFile();
+        if (activeFile && activeFile.extension === 'canvas') {
+            this.updateComplexityScore(activeFile);
+        }
     }
 
     async playActiveCanvas() {
@@ -440,9 +496,6 @@ export default class CanvasPlayerPlugin extends Plugin {
     }
 }
 
-// ... Keep your Settings and Modal Classes below unchanged ...
-// ... (Include CanvasPlayerSettingTab and CanvasPlayerModal classes from previous step) ...
-// START: CanvasPlayerSettingTab
 class CanvasPlayerSettingTab extends PluginSettingTab {
     plugin: CanvasPlayerPlugin;
 
@@ -477,11 +530,56 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
                     this.plugin.settings.startText = value;
                     await this.plugin.saveSettings();
                 }));
+
+        new Setting(containerEl)
+            .setName('Show complexity score')
+            .setDesc('Display the calculated complexity score in the canvas view header.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showComplexityScore)
+                .onChange(async (value) => {
+                    this.plugin.settings.showComplexityScore = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        containerEl.createEl('h2', { text: 'Complexity Score Weights' });
+        containerEl.createEl('p', { text: 'Adjust how much each metric contributes to the complexity score.' });
+
+        const weights = this.plugin.settings.complexityWeights;
+        const weightKeys: (keyof ComplexityWeights)[] = [
+            'nodeCount', 'edgeCount', 'cyclomaticComplexity', 
+            'branchingFactor', 'logicDensity', 'variableCount', 'contentVolume'
+        ];
+
+        for (const key of weightKeys) {
+             new Setting(containerEl)
+                .setName(this.formatKey(key))
+                .addSlider(slider => slider
+                    .setLimits(0, 10, 0.1)
+                    .setValue(weights[key])
+                    .setDynamicTooltip()
+                    .onChange(async (value) => {
+                        weights[key] = value;
+                        await this.plugin.saveSettings();
+                    }));
+        }
+        
+        new Setting(containerEl)
+            .setName('Restore Default Weights')
+            .addButton(btn => btn
+                .setButtonText('Restore')
+                .onClick(async () => {
+                    this.plugin.settings.complexityWeights = Object.assign({}, DEFAULT_COMPLEXITY_WEIGHTS);
+                    await this.plugin.saveSettings();
+                    this.display();
+                }));
+    }
+
+    formatKey(key: string): string {
+        // CamelCase to readable string
+        return key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
     }
 }
-// END: CanvasPlayerSettingTab
 
-// START: CanvasPlayerModal
 class CanvasPlayerModal extends Modal {
     canvasData: CanvasData;
     currentNode: CanvasNode;
@@ -606,4 +704,3 @@ class CanvasPlayerModal extends Modal {
         }
     }
 }
-// END: CanvasPlayerModal
