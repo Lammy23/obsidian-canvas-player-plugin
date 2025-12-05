@@ -41,7 +41,7 @@ export class ComplexityCalculator {
             const parsed = LogicEngine.parseLabel(label);
             
             parsed.sets.forEach(s => variables.add(s.variable));
-            parsed.conditions.forEach(c => variables.add(c.variable));
+            parsed.dependencies.forEach(v => variables.add(v));
         }
 
         const logicDensity = edgeCount > 0 ? logicEdgeCount / edgeCount : 0;
@@ -83,4 +83,3 @@ export class ComplexityCalculator {
         return Math.round(score);
     }
 }
-
