@@ -1,6 +1,6 @@
-import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu, debounce } from 'obsidian';
+import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu, debounce, WorkspaceLeaf } from 'obsidian';
 import { LogicEngine, GameState } from './logic';
-import { CanvasNode, CanvasData } from './types';
+import { CanvasNode, CanvasData, StackFrame } from './types';
 import { CanvasPlayerSettings, DEFAULT_SETTINGS, DEFAULT_COMPLEXITY_WEIGHTS, ComplexityWeights } from './settings';
 import { ComplexityCalculator } from './complexity';
 
@@ -9,6 +9,7 @@ export default class CanvasPlayerPlugin extends Plugin {
     activeHud: HTMLElement | null = null; 
     activeOverlay: HTMLElement | null = null;
     currentSessionState: GameState = {};
+    stack: StackFrame[] = [];
     
     // Map to track score elements per view
     scoreElements: Map<ItemView, HTMLElement> = new Map();
@@ -248,8 +249,8 @@ export default class CanvasPlayerPlugin extends Plugin {
             }
 
             // Only allow playing from text nodes
-            if (matchingNode.type !== 'text') {
-                new Notice('Can only play from text cards.');
+            if (matchingNode.type !== 'text' && matchingNode.type !== 'file') {
+                new Notice('Can only play from text or file cards.');
                 return;
             }
 
@@ -261,6 +262,10 @@ export default class CanvasPlayerPlugin extends Plugin {
     }
 
     async playCanvasFromNode(canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode) {
+        // Clear stack if starting a new session from scratch (unless we are recursing)
+        // If this is called from the play command, we might want to reset.
+        // For now, assume manual calls reset the stack unless handled internally.
+        
         if (this.settings.mode === 'modal') {
             new CanvasPlayerModal(this, canvasFile, canvasData, startNode).open();
         } else {
@@ -303,7 +308,13 @@ export default class CanvasPlayerPlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(ItemView);
         if (!view || view.getViewType() !== 'canvas') return;
 
-        this.currentSessionState = {}; // Reset state for new session
+        // Don't reset stack here if we are navigating? 
+        // Actually startCameraMode is usually the entry point.
+        // If we are navigating, we handle stack elsewhere.
+        if (this.stack.length === 0) {
+            this.currentSessionState = {}; // Reset state for new session only at root
+        }
+
         this.createHud(view, data, startNode);
         
         // Initial Move
@@ -341,10 +352,21 @@ export default class CanvasPlayerPlugin extends Plugin {
          this.activeOverlay?.remove();
          this.activeHud = null;
          this.activeOverlay = null;
+         this.stack = []; // Clear stack on stop
     }
 
-    renderChoicesInHud(view: ItemView, data: CanvasData, currentNode: CanvasNode, container: HTMLElement) {
+    async renderChoicesInHud(view: ItemView, data: CanvasData, currentNode: CanvasNode, container: HTMLElement) {
         container.empty();
+
+        // Handle Markdown File Nodes (Embedded Notes)
+        if (currentNode.type === 'file' && currentNode.file && !currentNode.file.endsWith('.canvas')) {
+             const file = this.app.metadataCache.getFirstLinkpathDest(currentNode.file, view.file?.path || "");
+             if (file instanceof TFile) {
+                 const content = await this.app.vault.read(file);
+                 const contentEl = container.createDiv({ cls: 'canvas-player-note-content' });
+                 await MarkdownRenderer.render(this.app, content, contentEl, file.path, this as unknown as Component);
+             }
+        }
 
         const rawChoices = data.edges.filter(edge => edge.fromNode === currentNode.id);
         
@@ -392,12 +414,22 @@ export default class CanvasPlayerPlugin extends Plugin {
         const validChoices = parsedChoices.filter(item => LogicEngine.checkConditions(item.parsed, this.currentSessionState));
 
         if (validChoices.length === 0) {
-            new ButtonComponent(container)
-                .setButtonText("End of Path") 
-                .onClick(() => {
-                    this.stopCameraMode();
-                })
-                .buttonEl.addClass('mod-cta');
+            if (this.stack.length > 0) {
+                new ButtonComponent(container)
+                    .setButtonText("Return to Parent Canvas")
+                    .setCta()
+                    .onClick(async () => {
+                         await this.popStackAndReturn();
+                    })
+                    .buttonEl.addClass('mod-cta');
+            } else {
+                new ButtonComponent(container)
+                    .setButtonText("End of Path") 
+                    .onClick(() => {
+                        this.stopCameraMode();
+                    })
+                    .buttonEl.addClass('mod-cta');
+            }
         } else {
             validChoices.forEach(choice => {
                 const nextNode = data.nodes.find(n => n.id === choice.edge.toNode);
@@ -405,10 +437,16 @@ export default class CanvasPlayerPlugin extends Plugin {
 
                 new ButtonComponent(container)
                     .setButtonText(label)
-                    .onClick(() => {
+                    .onClick(async () => {
                         if (nextNode) {
                             // Update state
                             LogicEngine.updateState(choice.parsed, this.currentSessionState);
+
+                            // Check if next node is a Canvas file
+                            if (nextNode.type === 'file' && nextNode.file && nextNode.file.endsWith('.canvas')) {
+                                await this.diveIntoCanvas(view, data, nextNode);
+                                return;
+                            }
 
                             // 1. Remove spotlight (clear view for movement)
                             this.removeSpotlight();
@@ -428,6 +466,87 @@ export default class CanvasPlayerPlugin extends Plugin {
                     .buttonEl.addClass('canvas-player-btn');
             });
         }
+    }
+
+    async diveIntoCanvas(view: ItemView, currentData: CanvasData, fileNode: CanvasNode) {
+        const filePath = fileNode.file;
+        if (!filePath) return;
+
+        const targetFile = this.app.metadataCache.getFirstLinkpathDest(filePath, view.file?.path || "");
+        
+        if (!targetFile || targetFile.extension !== 'canvas') {
+             new Notice(`Could not find canvas file: ${filePath}`);
+             return;
+        }
+
+        // 1. Push to stack
+        // We need the current file.
+        // @ts-ignore
+        const currentFile = view.file; 
+        if (!currentFile) return;
+
+        this.stack.push({
+            file: currentFile,
+            data: currentData,
+            currentNode: fileNode,
+            state: Object.assign({}, this.currentSessionState) // Clone state if needed, or store "parent" state
+        });
+
+        // 2. Reset state for isolated scope (User selected "Isolated")
+        this.currentSessionState = {}; 
+
+        // 3. Open the new file
+        const leaf = view.leaf;
+        await leaf.openFile(targetFile);
+        
+        // 4. Get new view and data
+        const newView = leaf.view as ItemView;
+        const content = await this.app.vault.read(targetFile);
+        const newData: CanvasData = JSON.parse(content);
+        const startNode = this.getStartNode(newData);
+
+        if (!startNode) {
+             new Notice('No start node found in embedded canvas.');
+             // Rollback?
+             await this.popStackAndReturn();
+             return;
+        }
+
+        // 5. Start playing in new context
+        this.createHud(newView, newData, startNode);
+        this.zoomToNode(newView, startNode);
+        setTimeout(() => {
+            this.applySpotlight(newView, startNode);
+        }, 400);
+    }
+
+    async popStackAndReturn() {
+        const frame = this.stack.pop();
+        if (!frame) {
+            this.stopCameraMode();
+            return;
+        }
+
+        // Restore active file
+        const leaf = this.app.workspace.getLeaf();
+        if (!leaf) return;
+
+        await leaf.openFile(frame.file);
+        const view = leaf.view as ItemView;
+
+        // Restore state (Isolated means we discard current, restore parent)
+        // Note: If user selected "Shared", we wouldn't discard, but merge or keep. 
+        // Implementing Isolated as requested.
+        this.currentSessionState = frame.state;
+
+        // Restore HUD at the node we left off (the File node)
+        this.createHud(view, frame.data, frame.currentNode);
+        
+        // Zoom to that node
+        this.zoomToNode(view, frame.currentNode);
+        setTimeout(() => {
+            this.applySpotlight(view, frame.currentNode);
+        }, 400);
     }
 
     removeSpotlight() {
@@ -587,6 +706,7 @@ class CanvasPlayerModal extends Modal {
     private plugin: CanvasPlayerPlugin;
     private canvasFile: TFile;
     private state: GameState = {};
+    private stack: StackFrame[] = [];
 
     constructor(plugin: CanvasPlayerPlugin, canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode) {
         super(plugin.app);
@@ -622,14 +742,38 @@ class CanvasPlayerModal extends Modal {
             .onClick(() => {
                 void this.openNodeForEditing();
             });
-        
-        await MarkdownRenderer.render(
-            this.app,
-            this.currentNode.text || "...",
-            textContainer,
-            "/",
-            this as unknown as Component
-        );
+
+        // Handle File Nodes (Display Content)
+        if (this.currentNode.type === 'file' && this.currentNode.file) {
+            const file = this.app.metadataCache.getFirstLinkpathDest(this.currentNode.file, this.canvasFile.path);
+            if (file instanceof TFile) {
+                if (file.extension !== 'canvas') {
+                     // Markdown files
+                    const content = await this.app.vault.read(file);
+                    await MarkdownRenderer.render(
+                        this.app,
+                        content,
+                        textContainer,
+                        file.path,
+                        this as unknown as Component
+                    );
+                } else {
+                    // Canvas files (Placeholder if not diving in)
+                    // Or we could just say "Nested Canvas: Name"
+                    textContainer.createEl('h3', { text: `Nested Canvas: ${file.basename}` });
+                }
+            } else {
+                textContainer.setText(`File not found: ${this.currentNode.file}`);
+            }
+        } else {
+            await MarkdownRenderer.render(
+                this.app,
+                this.currentNode.text || "...",
+                textContainer,
+                "/",
+                this as unknown as Component
+            );
+        }
 
         const rawChoices = this.canvasData.edges.filter(edge => edge.fromNode === this.currentNode.id);
         
@@ -674,14 +818,31 @@ class CanvasPlayerModal extends Modal {
         const validChoices = parsedChoices.filter(item => LogicEngine.checkConditions(item.parsed, this.state));
 
         if (validChoices.length === 0) {
-            new ButtonComponent(buttonContainer).setButtonText("End of Path").onClick(() => this.close());
+            if (this.stack.length > 0) {
+                new ButtonComponent(buttonContainer)
+                    .setButtonText("Return to Parent Canvas")
+                    .setCta()
+                    .onClick(async () => {
+                         await this.returnToParent();
+                    })
+                    .buttonEl.addClass('mod-cta');
+            } else {
+                new ButtonComponent(buttonContainer).setButtonText("End of Path").onClick(() => this.close());
+            }
         } else {
             validChoices.forEach(choice => {
                 const nextNode = this.canvasData.nodes.find(n => n.id === choice.edge.toNode);
                 const lbl = choice.parsed.text || "Next";
-                new ButtonComponent(buttonContainer).setButtonText(lbl).onClick(() => {
+                new ButtonComponent(buttonContainer).setButtonText(lbl).onClick(async () => {
                     if (nextNode) {
                         LogicEngine.updateState(choice.parsed, this.state);
+                        
+                        // Check if next node is a Canvas file
+                        if (nextNode.type === 'file' && nextNode.file && nextNode.file.endsWith('.canvas')) {
+                            await this.diveIntoCanvas(nextNode);
+                            return;
+                        }
+
                         this.history.push(this.currentNode);
                         this.currentNode = nextNode;
                         this.renderScene();
@@ -689,6 +850,79 @@ class CanvasPlayerModal extends Modal {
                 });
             });
         }
+    }
+
+    private async diveIntoCanvas(fileNode: CanvasNode) {
+        const filePath = fileNode.file;
+        if (!filePath) return;
+
+        const targetFile = this.app.metadataCache.getFirstLinkpathDest(filePath, this.canvasFile.path);
+        
+        if (!targetFile || targetFile.extension !== 'canvas') {
+             new Notice(`Could not find canvas file: ${filePath}`);
+             return;
+        }
+
+        // Push to stack
+        this.stack.push({
+            file: this.canvasFile,
+            data: this.canvasData,
+            currentNode: fileNode,
+            state: Object.assign({}, this.state)
+        });
+
+        // Reset state for isolated scope
+        this.state = {};
+
+        // Load new file
+        this.canvasFile = targetFile;
+        const content = await this.app.vault.read(targetFile);
+        this.canvasData = JSON.parse(content);
+        
+        const startNode = this.plugin['getStartNode'](this.canvasData); // Accessing private method... ideally make public or duplicate logic
+        // Since getStartNode is private, I'll duplicate the simple logic or cast plugin to any.
+        // Let's cast to any for now or better, make getStartNode public in next step. 
+        // Actually, I can just implement the search logic here to be safe.
+        
+        let safeStartNode: CanvasNode | null = null;
+        const startText = this.plugin.settings.startText?.toLowerCase().trim();
+        if (startText) {
+            safeStartNode = this.canvasData.nodes.find(node =>
+                node.type === 'text' && typeof node.text === 'string' && node.text.toLowerCase().includes(startText)
+            ) || null;
+        }
+        if (!safeStartNode) {
+             const nodeIdsWithIncoming = new Set(this.canvasData.edges.map(e => e.toNode));
+             safeStartNode = this.canvasData.nodes.find(n => n.type === 'text' && !nodeIdsWithIncoming.has(n.id)) || this.canvasData.nodes[0];
+        }
+
+        if (safeStartNode) {
+            this.currentNode = safeStartNode;
+            // Clear history for the new canvas context (so back button doesn't jump across files weirdly)
+            // Or we can keep it if we want to back out of the file? 
+            // Current stack logic handles returning. So clearing history for this "session" is fine.
+            this.history = []; 
+            this.renderScene();
+        } else {
+             new Notice('No start node found in embedded canvas.');
+             await this.returnToParent();
+        }
+    }
+
+    private async returnToParent() {
+        const frame = this.stack.pop();
+        if (!frame) {
+            this.close();
+            return;
+        }
+
+        this.canvasFile = frame.file;
+        this.canvasData = frame.data;
+        this.currentNode = frame.currentNode;
+        this.state = frame.state;
+        this.history = []; // Reset history or restore? frame doesn't have history. 
+        
+        this.renderScene();
     }
 
     private async openNodeForEditing() {
