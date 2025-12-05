@@ -360,7 +360,7 @@ export default class CanvasPlayerPlugin extends Plugin {
 
         // Handle Markdown File Nodes (Embedded Notes)
         if (currentNode.type === 'file' && currentNode.file && !currentNode.file.endsWith('.canvas')) {
-             const file = this.app.metadataCache.getFirstLinkpathDest(currentNode.file, view.file?.path || "");
+             const file = this.app.metadataCache.getFirstLinkpathDest(currentNode.file, (view as any).file?.path || "");
              if (file instanceof TFile) {
                  const content = await this.app.vault.read(file);
                  const contentEl = container.createDiv({ cls: 'canvas-player-note-content' });
@@ -472,7 +472,7 @@ export default class CanvasPlayerPlugin extends Plugin {
         const filePath = fileNode.file;
         if (!filePath) return;
 
-        const targetFile = this.app.metadataCache.getFirstLinkpathDest(filePath, view.file?.path || "");
+        const targetFile = this.app.metadataCache.getFirstLinkpathDest(filePath, (view as any).file?.path || "");
         
         if (!targetFile || targetFile.extension !== 'canvas') {
              new Notice(`Could not find canvas file: ${filePath}`);
