@@ -3,6 +3,7 @@ import { LogicEngine, GameState } from './logic';
 import { CanvasNode, CanvasData, StackFrame } from './types';
 import { CanvasPlayerSettings, DEFAULT_SETTINGS, DEFAULT_COMPLEXITY_WEIGHTS, ComplexityWeights } from './settings';
 import { ComplexityCalculator } from './complexity';
+import { extractNodeInfo, transformNode, convertCardToGroup, convertGroupToCard } from './canvasTransforms';
 
 export default class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
@@ -80,6 +81,17 @@ export default class CanvasPlayerPlugin extends Plugin {
                             await this.playFromNode(node);
                         });
                 });
+                
+                // Add transform menu items
+                this.addTransformMenuItems(menu, node);
+            })
+        );
+        
+        // Also register for group-menu as a compatibility hook
+        // Some Obsidian builds fire a dedicated group menu event
+        this.registerEvent(
+            (this.app.workspace as any).on('canvas:group-menu', (menu: Menu, node: any) => {
+                this.addTransformMenuItems(menu, node);
             })
         );
     }
@@ -217,6 +229,42 @@ export default class CanvasPlayerPlugin extends Plugin {
         if (!startNode) return;
 
         await this.playCanvasFromNode(activeFile, canvasData, startNode);
+    }
+
+    addTransformMenuItems(menu: Menu, node: any) {
+        const nodeInfo = extractNodeInfo(node);
+        if (!nodeInfo) {
+            return;
+        }
+        
+        const { id, type } = nodeInfo;
+        
+        // Add separator before transform options
+        menu.addSeparator();
+        
+        // Card to Group conversion
+        if (type === 'text' || type === 'file') {
+            menu.addItem((item: any) => {
+                item
+                    .setTitle('Convert to group')
+                    .setIcon('folder')
+                    .onClick(async () => {
+                        await transformNode(this.app, id, type, convertCardToGroup);
+                    });
+            });
+        }
+        
+        // Group to Card conversion
+        if (type === 'group') {
+            menu.addItem((item: any) => {
+                item
+                    .setTitle('Convert to card')
+                    .setIcon('file-text')
+                    .onClick(async () => {
+                        await transformNode(this.app, id, type, convertGroupToCard);
+                    });
+            });
+        }
     }
 
     async playFromNode(contextNode: any) {

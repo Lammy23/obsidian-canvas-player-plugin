@@ -10,6 +10,7 @@ export interface CanvasNode {
     width: number;
     height: number;
     file?: string; // For file nodes
+    label?: string; // For group nodes
 }
 
 export interface CanvasEdge {
