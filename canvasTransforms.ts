@@ -133,8 +133,17 @@ export async function transformNode(
     try {
         const content = await app.vault.read(activeFile);
         const canvasData: CanvasData = JSON.parse(content);
-        
-        await transformFn(app, activeFile, nodeId, canvasData);
+
+        const didTransform = await transformFn(app, activeFile, nodeId, canvasData);
+        if (didTransform) {
+            // Force refresh so the Canvas updates immediately without needing to navigate away/back.
+            // rebuildView() isn't in the official types, so we guard access.
+            try {
+                (app.workspace.activeLeaf as any)?.rebuildView?.();
+            } catch (e) {
+                console.warn('Canvas transform: failed to rebuild view', e);
+            }
+        }
     } catch (error) {
         console.error('Canvas transform error:', error);
         new Notice('Failed to transform node. Check console for details.');
