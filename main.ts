@@ -190,26 +190,41 @@ export default class CanvasPlayerPlugin extends Plugin {
         });
     }
 
-    private getStartNode(data: CanvasData): CanvasNode | null {
+    getStartNode(data: CanvasData): CanvasNode | null {
         const startText = this.settings.startText?.toLowerCase().trim();
-        if (startText) {
-            const matchingNode = data.nodes.find(node =>
-                node.type === 'text' &&
-                typeof node.text === 'string' &&
-                node.text.toLowerCase().includes(startText)
+        if (!startText) {
+            // If no start text configured, fall back to old behavior
+            const nodeIdsWithIncoming = new Set(data.edges.map(e => e.toNode));
+            const firstTextWithoutIncoming = data.nodes.find(
+                n => n.type === 'text' && !nodeIdsWithIncoming.has(n.id)
             );
-
-            if (matchingNode) {
-                return matchingNode;
-            }
+            return firstTextWithoutIncoming || data.nodes[0] || null;
         }
 
-        const nodeIdsWithIncoming = new Set(data.edges.map(e => e.toNode));
-        const firstTextWithoutIncoming = data.nodes.find(
-            n => n.type === 'text' && !nodeIdsWithIncoming.has(n.id)
+        // Find the marker node (contains startText)
+        const markerNode = data.nodes.find(node =>
+            node.type === 'text' &&
+            typeof node.text === 'string' &&
+            node.text.toLowerCase().includes(startText)
         );
 
-        return firstTextWithoutIncoming || data.nodes[0] || null;
+        if (!markerNode) {
+            // Marker node not found - return null (caller will show warning)
+            return null;
+        }
+
+        // Find the node the marker points to (skip the marker node)
+        const edgesFromMarker = data.edges.filter(edge => edge.fromNode === markerNode.id);
+        if (edgesFromMarker.length === 0) {
+            // Marker node has no outgoing edges - return null (caller will show warning)
+            return null;
+        }
+
+        // Get the first node the marker points to
+        const targetNodeId = edgesFromMarker[0].toNode;
+        const targetNode = data.nodes.find(n => n.id === targetNodeId);
+        
+        return targetNode || null;
     }
 
     async loadSettings() {
@@ -242,7 +257,10 @@ export default class CanvasPlayerPlugin extends Plugin {
 
         const startNode = this.getStartNode(canvasData);
 
-        if (!startNode) return;
+        if (!startNode) {
+            new Notice(`Cannot start: Could not find a text card containing "${this.settings.startText}" that points to a playable node. Please ensure your canvas has a start marker card.`);
+            return;
+        }
 
         await this.playCanvasFromNode(activeFile, canvasData, startNode);
     }
@@ -356,7 +374,7 @@ export default class CanvasPlayerPlugin extends Plugin {
             const startNode = this.getStartNode(canvasData);
 
             if (!startNode) {
-                new Notice('Could not find a start card in this canvas.');
+                new Notice(`Cannot zoom to start: Could not find a text card containing "${this.settings.startText}" that points to a playable node. Please ensure your canvas has a start marker card.`);
                 return;
             }
 
@@ -405,9 +423,12 @@ export default class CanvasPlayerPlugin extends Plugin {
         // Top-right controls container
         const topControls = hudEl.createDiv({ cls: 'canvas-hud-top-controls' });
         
-        // Timer display (top-right)
-        const timerEl = topControls.createDiv({ cls: 'canvas-player-timer' });
-        timerEl.setText('--:--');
+        // Timer display (top-right) - only if timeboxing is enabled
+        let timerEl: HTMLElement | null = null;
+        if (this.settings.enableTimeboxing) {
+            timerEl = topControls.createDiv({ cls: 'canvas-player-timer' });
+            timerEl.setText('--:--');
+        }
         
         const closeBtn = topControls.createEl('button', { text: 'Stop Playing', cls: 'canvas-hud-close' });
         closeBtn.onclick = () => {
@@ -421,13 +442,20 @@ export default class CanvasPlayerPlugin extends Plugin {
         this.currentCanvasData = data;
         this.currentNodeForTimer = currentNode;
         
-        // Start timer for current node
-        await this.startTimerForNode(view, data, currentNode, timerEl);
+        // Start timer for current node (if enabled and timer element exists)
+        if (timerEl) {
+            await this.startTimerForNode(view, data, currentNode, timerEl);
+        }
         
         this.renderChoicesInHud(view, data, currentNode, choicesContainer);
     }
 
     async startTimerForNode(view: ItemView, data: CanvasData, node: CanvasNode, timerEl: HTMLElement) {
+        // Only start timer if timeboxing is enabled
+        if (!this.settings.enableTimeboxing) {
+            return;
+        }
+
         // Abort any existing timer
         if (this.cameraTimer) {
             this.cameraTimer.abort();
@@ -439,7 +467,8 @@ export default class CanvasPlayerPlugin extends Plugin {
         if (!canvasFile) return;
 
         const timingData = await loadTimingForNode(this.app, canvasFile, node, data);
-        const initialMs = timingData ? timingData.avgMs : 5 * 60 * 1000; // Default 5 minutes
+        const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
+        const initialMs = timingData ? timingData.avgMs : defaultMs;
 
         // Create and start timer
         this.cameraTimer = new NodeTimerController();
@@ -447,7 +476,8 @@ export default class CanvasPlayerPlugin extends Plugin {
     }
 
     async finishTimerForCurrentNode(): Promise<void> {
-        if (!this.cameraTimer || !this.currentCanvasFile || !this.currentCanvasData || !this.currentNodeForTimer) {
+        // Only finish timer if timeboxing is enabled
+        if (!this.settings.enableTimeboxing || !this.cameraTimer || !this.currentCanvasFile || !this.currentCanvasData || !this.currentNodeForTimer) {
             return;
         }
 
@@ -613,11 +643,13 @@ export default class CanvasPlayerPlugin extends Plugin {
                             // 2. Move Camera
                             this.zoomToNode(view, nextNode);
                             
-                            // 3. Update timer context and restart timer for next node
+                            // 3. Update timer context and restart timer for next node (if enabled)
                             this.currentNodeForTimer = nextNode;
-                            const timerEl = this.activeHud?.querySelector('.canvas-player-timer') as HTMLElement;
-                            if (timerEl && this.currentCanvasData) {
-                                await this.startTimerForNode(view, this.currentCanvasData, nextNode, timerEl);
+                            if (this.settings.enableTimeboxing) {
+                                const timerEl = this.activeHud?.querySelector('.canvas-player-timer') as HTMLElement;
+                                if (timerEl && this.currentCanvasData) {
+                                    await this.startTimerForNode(view, this.currentCanvasData, nextNode, timerEl);
+                                }
                             }
                             
                             // 4. Render next buttons immediately
@@ -675,7 +707,7 @@ export default class CanvasPlayerPlugin extends Plugin {
         const startNode = this.getStartNode(newData);
 
         if (!startNode) {
-             new Notice('No start node found in embedded canvas.');
+             new Notice(`Cannot start embedded canvas: Could not find a text card containing "${this.settings.startText}" that points to a playable node.`);
              // Rollback?
              await this.popStackAndReturn();
              return;
@@ -813,7 +845,7 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('Start card text')
-            .setDesc('Reader mode and Zoom to start use the first text node whose content contains this string (case-insensitive).')
+            .setDesc('Text that identifies the start marker card. This card must point to the actual first playable node (case-insensitive).')
             .addText(text => text
                 .setPlaceholder('canvas-start')
                 .setValue(this.plugin.settings.startText)
@@ -831,6 +863,37 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
                     this.plugin.settings.showComplexityScore = value;
                     await this.plugin.saveSettings();
                 }));
+
+        containerEl.createEl('h2', { text: 'Timeboxing' });
+
+        new Setting(containerEl)
+            .setName('Enable timeboxing timer')
+            .setDesc('Show a countdown timer for each node based on average completion time.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableTimeboxing)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableTimeboxing = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Default node duration (minutes)')
+            .setDesc('Default countdown time for nodes that have not been timed yet.')
+            .addText(text => text
+                .setPlaceholder('5')
+                .setValue(this.plugin.settings.defaultNodeDurationMinutes.toString())
+                .onChange(async (value) => {
+                    const numValue = parseInt(value, 10);
+                    if (!isNaN(numValue) && numValue > 0 && numValue <= 999) {
+                        this.plugin.settings.defaultNodeDurationMinutes = numValue;
+                        await this.plugin.saveSettings();
+                    }
+                }));
+
+        containerEl.createEl('h2', { text: 'Start Node Requirement' });
+        containerEl.createEl('p', { 
+            text: `Your canvas must have a text card containing the start text (e.g., "${this.plugin.settings.startText}"). This card should point to the actual first playable node. The marker card itself will be skipped during playback.` 
+        });
 
         containerEl.createEl('h2', { text: 'Complexity Score Weights' });
         containerEl.createEl('p', { text: 'Adjust how much each metric contributes to the complexity score.' });
@@ -934,12 +997,14 @@ class CanvasPlayerModal extends Modal {
                 void this.openNodeForEditing();
             });
         
-        // Timer display (top-right) - created after buttons so it appears on the right
-        const timerEl = controls.createDiv({ cls: 'canvas-player-timer' });
-        timerEl.setText('--:--');
-            
-        // Start timer for current node
-        await this.startTimerForNode(timerEl);
+        // Timer display (top-right) - created after buttons so it appears on the right, only if enabled
+        let timerEl: HTMLElement | null = null;
+        if (this.plugin.settings.enableTimeboxing) {
+            timerEl = controls.createDiv({ cls: 'canvas-player-timer' });
+            timerEl.setText('--:--');
+            // Start timer for current node
+            await this.startTimerForNode(timerEl);
+        }
 
         // Handle File Nodes (Display Content)
         if (this.currentNode.type === 'file' && this.currentNode.file) {
@@ -1058,6 +1123,11 @@ class CanvasPlayerModal extends Modal {
     }
 
     async startTimerForNode(timerEl: HTMLElement) {
+        // Only start timer if timeboxing is enabled
+        if (!this.plugin.settings.enableTimeboxing) {
+            return;
+        }
+
         // Abort any existing timer
         if (this.modalTimer) {
             this.modalTimer.abort();
@@ -1066,7 +1136,8 @@ class CanvasPlayerModal extends Modal {
 
         // Load timing data for this node
         const timingData = await loadTimingForNode(this.app, this.canvasFile, this.currentNode, this.canvasData);
-        const initialMs = timingData ? timingData.avgMs : 5 * 60 * 1000; // Default 5 minutes
+        const defaultMs = this.plugin.settings.defaultNodeDurationMinutes * 60 * 1000;
+        const initialMs = timingData ? timingData.avgMs : defaultMs;
 
         // Create and start timer
         this.modalTimer = new NodeTimerController();
@@ -1074,7 +1145,8 @@ class CanvasPlayerModal extends Modal {
     }
 
     async finishTimerForCurrentNode(): Promise<void> {
-        if (!this.modalTimer) {
+        // Only finish timer if timeboxing is enabled
+        if (!this.plugin.settings.enableTimeboxing || !this.modalTimer) {
             return;
         }
 
@@ -1147,32 +1219,17 @@ class CanvasPlayerModal extends Modal {
         const content = await this.app.vault.read(targetFile);
         this.canvasData = JSON.parse(content);
         
-        const startNode = this.plugin['getStartNode'](this.canvasData); // Accessing private method... ideally make public or duplicate logic
-        // Since getStartNode is private, I'll duplicate the simple logic or cast plugin to any.
-        // Let's cast to any for now or better, make getStartNode public in next step. 
-        // Actually, I can just implement the search logic here to be safe.
-        
-        let safeStartNode: CanvasNode | null = null;
-        const startText = this.plugin.settings.startText?.toLowerCase().trim();
-        if (startText) {
-            safeStartNode = this.canvasData.nodes.find(node =>
-                node.type === 'text' && typeof node.text === 'string' && node.text.toLowerCase().includes(startText)
-            ) || null;
-        }
-        if (!safeStartNode) {
-             const nodeIdsWithIncoming = new Set(this.canvasData.edges.map(e => e.toNode));
-             safeStartNode = this.canvasData.nodes.find(n => n.type === 'text' && !nodeIdsWithIncoming.has(n.id)) || this.canvasData.nodes[0];
-        }
+        const startNode = this.plugin.getStartNode(this.canvasData);
 
-        if (safeStartNode) {
-            this.currentNode = safeStartNode;
+        if (startNode) {
+            this.currentNode = startNode;
             // Clear history for the new canvas context (so back button doesn't jump across files weirdly)
             // Or we can keep it if we want to back out of the file? 
             // Current stack logic handles returning. So clearing history for this "session" is fine.
             this.history = []; 
             await this.renderScene();
         } else {
-             new Notice('No start node found in embedded canvas.');
+             new Notice(`Cannot start embedded canvas: Could not find a text card containing "${this.plugin.settings.startText}" that points to a playable node.`);
              await this.returnToParent();
         }
     }

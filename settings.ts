@@ -14,6 +14,8 @@ export interface CanvasPlayerSettings {
     startText: string;
     showComplexityScore: boolean;
     complexityWeights: ComplexityWeights;
+    enableTimeboxing: boolean;
+    defaultNodeDurationMinutes: number;
 }
 
 export const DEFAULT_COMPLEXITY_WEIGHTS: ComplexityWeights = {
@@ -31,4 +33,6 @@ export const DEFAULT_SETTINGS: CanvasPlayerSettings = {
     startText: 'canvas-start',
     showComplexityScore: true,
     complexityWeights: DEFAULT_COMPLEXITY_WEIGHTS,
+    enableTimeboxing: true,
+    defaultNodeDurationMinutes: 5,
 };
