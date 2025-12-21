@@ -21,10 +21,33 @@ If your plugin does not need CSS, delete this file.
     justify-content: space-between;
 }
 
-.canvas-hud-close {
+.canvas-hud-top-controls {
     pointer-events: auto;
-    align-self: flex-end;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
     margin: 20px;
+}
+
+.canvas-player-timer {
+    font-family: var(--font-monospace);
+    font-size: 1.1em;
+    font-weight: 500;
+    padding: 5px 12px;
+    background-color: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 5px;
+    color: var(--text-normal);
+    user-select: none;
+}
+
+.canvas-player-timer-negative {
+    color: var(--text-error, #d32f2f);
+    border-color: var(--text-error, #d32f2f);
+}
+
+.canvas-hud-close {
     background-color: var(--background-primary);
     border: 1px solid var(--background-modifier-border);
     padding: 5px 15px;
@@ -74,7 +97,15 @@ If your plugin does not need CSS, delete this file.
 
 /* --- READER MODE STYLES (Keep these for the other mode) --- */
 .canvas-player-container { display: flex; flex-direction: column; height: 100%; padding: 10px; }
-.canvas-player-controls { display: flex; gap: 10px; margin-bottom: 10px; }
+.canvas-player-controls { 
+    display: flex; 
+    gap: 10px; 
+    margin-bottom: 10px; 
+    align-items: center;
+}
+.canvas-player-controls .canvas-player-timer {
+    margin-left: auto;
+}
 .canvas-player-text { font-size: 1.2em; flex-grow: 1; overflow-y: auto; margin-bottom: 20px; }
 .canvas-player-choices { display: flex; flex-direction: column; gap: 10px; }
 
