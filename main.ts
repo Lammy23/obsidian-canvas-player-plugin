@@ -1,12 +1,12 @@
 import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu, debounce, WorkspaceLeaf } from 'obsidian';
 import { LogicEngine, GameState } from './logic';
 import { CanvasNode, CanvasData, StackFrame } from './types';
-import { CanvasPlayerSettings, DEFAULT_SETTINGS, DEFAULT_COMPLEXITY_WEIGHTS, ComplexityWeights } from './settings';
-import { ComplexityCalculator } from './complexity';
+import { CanvasPlayerSettings, DEFAULT_SETTINGS } from './settings';
 import { extractNodeInfo, transformNode, convertCardToGroup, convertGroupToCard } from './canvasTransforms';
 import { NodeTimerController, TimingData } from './timeboxing';
 import { loadTimingForNode, saveTimingForNode } from './timingStorage';
 import { PluginData, ResumeSession, ResumeStackFrame, validateResumeSession, restoreStackFromResume } from './resumeStorage';
+import { resetTimeboxingRecursive } from './timeboxingReset';
 
 export default class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
@@ -15,8 +15,8 @@ export default class CanvasPlayerPlugin extends Plugin {
     currentSessionState: GameState = {};
     stack: StackFrame[] = [];
     
-    // Map to track score elements per view
-    scoreElements: Map<ItemView, HTMLElement> = new Map();
+    // Map to track reset stats button elements per view
+    resetStatsElements: Map<ItemView, HTMLElement> = new Map();
     
     // Timer state for Camera Mode
     cameraTimer: NodeTimerController | null = null;
@@ -40,17 +40,6 @@ export default class CanvasPlayerPlugin extends Plugin {
 
         this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
             this.refreshCanvasViewActions();
-        }));
-        
-        // Update score when file changes
-        const debouncedUpdate = debounce((file: TFile) => {
-             this.updateComplexityScore(file);
-        }, 1000, true);
-
-        this.registerEvent(this.app.vault.on('modify', (file) => {
-            if (file instanceof TFile && file.extension === 'canvas') {
-                debouncedUpdate(file);
-            }
         }));
 
         this.addCommand({
@@ -134,37 +123,37 @@ export default class CanvasPlayerPlugin extends Plugin {
             if (leaf.view.getViewType() === 'canvas') {
                 const view = leaf.view as ItemView;
                 
-                // Inject Complexity Score if enabled
-                if (this.settings.showComplexityScore) {
-                    if (!this.scoreElements.has(view)) {
-                        // Find the view actions container
-                        // @ts-ignore: headerEl is not in the public API but exists on ItemView
-                        const actionsContainer = view.headerEl.querySelector('.view-actions');
-                        if (actionsContainer) {
-                            const scoreEl = createDiv({ cls: 'canvas-complexity-score' });
-                            scoreEl.style.marginRight = '10px';
-                            scoreEl.style.fontSize = '0.8em';
-                            scoreEl.style.color = 'var(--text-muted)';
-                            scoreEl.style.alignSelf = 'center';
+                // Add Reset Stats button if timeboxing is enabled
+                // @ts-ignore: headerEl is not in the public API but exists on ItemView
+                const actionsContainer = view.headerEl.querySelector('.view-actions');
+                if (this.settings.enableTimeboxing) {
+                    if (!this.resetStatsElements.has(view) && actionsContainer) {
+                        // @ts-ignore: file exists on ItemView but might be missing from type definition in some versions
+                        const file = (view.file as TFile | null) ?? undefined;
+                        if (file && file.extension === 'canvas') {
+                            const resetBtn = createEl('button', {
+                                cls: 'canvas-reset-stats-btn',
+                                text: 'Reset stats',
+                                attr: { 'aria-label': 'Reset timeboxing stats for this canvas' }
+                            });
+                            resetBtn.style.marginRight = '10px';
+                            resetBtn.style.fontSize = '0.85em';
+                            resetBtn.style.padding = '4px 8px';
+                            resetBtn.onclick = () => {
+                                new ConfirmResetTimeboxingModal(this.app, this, file).open();
+                            };
                             
-                            // Prepend to actions container
-                            actionsContainer.insertBefore(scoreEl, actionsContainer.firstChild);
-                            this.scoreElements.set(view, scoreEl);
-                            
-                            // Initial update if file is loaded
-                            // @ts-ignore: file exists on ItemView but might be missing from type definition in some versions
-                            const file = view.file;
-                            if (file) {
-                                this.updateComplexityScore(file);
-                            }
+                            // Insert before player buttons (they're added via addAction, so insert near the end of actionsContainer children)
+                            actionsContainer.insertBefore(resetBtn, actionsContainer.lastChild);
+                            this.resetStatsElements.set(view, resetBtn);
                         }
                     }
                 } else {
-                    // If disabled, remove any existing score elements
-                    const scoreEl = this.scoreElements.get(view);
-                    if (scoreEl) {
-                        scoreEl.remove();
-                        this.scoreElements.delete(view);
+                    // If disabled, remove any existing reset button elements
+                    const resetBtn = this.resetStatsElements.get(view);
+                    if (resetBtn) {
+                        resetBtn.remove();
+                        this.resetStatsElements.delete(view);
                     }
                 }
 
@@ -185,30 +174,6 @@ export default class CanvasPlayerPlugin extends Plugin {
         });
     }
 
-    async updateComplexityScore(file: TFile) {
-        if (!this.settings.showComplexityScore) return;
-
-        // Only update for active canvas views showing this file
-        this.app.workspace.iterateAllLeaves(async (leaf) => {
-            if (leaf.view.getViewType() === 'canvas' && (leaf.view as any).file?.path === file.path) {
-                const view = leaf.view as ItemView;
-                const scoreEl = this.scoreElements.get(view);
-                if (scoreEl) {
-                    try {
-                        const content = await this.app.vault.read(file);
-                        const data: CanvasData = JSON.parse(content);
-                        const metrics = ComplexityCalculator.calculate(data);
-                        const score = ComplexityCalculator.computeScore(metrics, this.settings.complexityWeights);
-                        scoreEl.setText(`Complexity: ${score}`);
-                        scoreEl.title = `Nodes: ${metrics.nodeCount}\nEdges: ${metrics.edgeCount}\nCyclomatic: ${metrics.cyclomaticComplexity}\nBranching: ${metrics.branchingFactor.toFixed(2)}\nLogic Density: ${(metrics.logicDensity * 100).toFixed(0)}%\nVars: ${metrics.variableCount}\nVol: ${metrics.contentVolume}`;
-                    } catch (e) {
-                        console.error('Failed to calculate complexity', e);
-                        scoreEl.setText('Complexity: Err');
-                    }
-                }
-            }
-        });
-    }
 
     getStartNode(data: CanvasData): CanvasNode | null {
         const startText = this.settings.startText?.toLowerCase().trim();
@@ -275,8 +240,13 @@ export default class CanvasPlayerPlugin extends Plugin {
             }
         }
         
-        // Ensure nested objects are merged correctly
-        this.settings.complexityWeights = Object.assign({}, DEFAULT_COMPLEXITY_WEIGHTS, this.settings.complexityWeights);
+        // Clean up any old complexity-related settings that might exist
+        if ('showComplexityScore' in this.settings) {
+            delete (this.settings as any).showComplexityScore;
+        }
+        if ('complexityWeights' in this.settings) {
+            delete (this.settings as any).complexityWeights;
+        }
     }
 
     async savePluginData(): Promise<void> {
@@ -289,12 +259,6 @@ export default class CanvasPlayerPlugin extends Plugin {
         
         // Refresh UI based on new settings
         this.refreshCanvasViewActions();
-        
-        // Refresh scores when settings change
-        const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile && activeFile.extension === 'canvas') {
-            this.updateComplexityScore(activeFile);
-        }
     }
 
     async saveResumeSession(rootFilePath: string, session: ResumeSession): Promise<void> {
@@ -495,7 +459,7 @@ export default class CanvasPlayerPlugin extends Plugin {
         }
 
         if (this.settings.mode === 'modal') {
-            new CanvasPlayerModal(this, canvasFile, canvasData, startNode, initialState, initialStack, this.rootCanvasFile).open();
+            new CanvasPlayerModal(this, canvasFile, canvasData, startNode, initialState, initialStack, this.rootCanvasFile ?? undefined).open();
         } else {
             // For camera mode, restore state/stack if provided (resume), otherwise reset (new session)
             if (initialState) {
@@ -998,6 +962,75 @@ export default class CanvasPlayerPlugin extends Plugin {
     }
 }
 
+class ConfirmResetTimeboxingModal extends Modal {
+    plugin: CanvasPlayerPlugin;
+    canvasFile: TFile;
+
+    constructor(app: App, plugin: CanvasPlayerPlugin, canvasFile: TFile) {
+        super(app);
+        this.plugin = plugin;
+        this.canvasFile = canvasFile;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+
+        contentEl.createEl('h2', { text: 'Reset timeboxing stats?' });
+
+        contentEl.createEl('p', {
+            text: 'This will reset all timeboxing statistics for this canvas, including:'
+        });
+
+        const list = contentEl.createEl('ul');
+        list.createEl('li', { text: 'Current canvas file' });
+        list.createEl('li', { text: 'Linked markdown files referenced by nodes in this canvas' });
+        list.createEl('li', { text: 'Note: Nested canvas files are not affected and must be reset manually' });
+
+        contentEl.createEl('p', {
+            text: 'This action cannot be undone.',
+            cls: 'mod-warning'
+        });
+
+        const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+        
+        new ButtonComponent(buttonContainer)
+            .setButtonText('Cancel')
+            .onClick(() => this.close());
+
+        new ButtonComponent(buttonContainer)
+            .setButtonText('Reset')
+            .setCta()
+            .setWarning()
+            .onClick(async () => {
+                try {
+                    const result = await resetTimeboxingRecursive(this.app, this.canvasFile);
+                    this.close();
+                    const parts: string[] = [];
+                    if (result.canvasCount > 0) {
+                        parts.push('canvas reset');
+                    }
+                    if (result.markdownFileCount > 0) {
+                        parts.push(`${result.markdownFileCount} markdown file${result.markdownFileCount !== 1 ? 's' : ''} updated`);
+                    }
+                    const message = parts.length > 0 
+                        ? `Reset timeboxing stats: ${parts.join(' and ')}.`
+                        : 'Reset timeboxing stats.';
+                    new Notice(message);
+                } catch (error) {
+                    console.error('Failed to reset timeboxing stats', error);
+                    new Notice('Failed to reset timeboxing stats. Check console for details.');
+                    this.close();
+                }
+            });
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
 class CanvasPlayerSettingTab extends PluginSettingTab {
     plugin: CanvasPlayerPlugin;
 
@@ -1033,16 +1066,6 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
-            .setName('Show complexity score')
-            .setDesc('Display the calculated complexity score in the canvas view header.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.showComplexityScore)
-                .onChange(async (value) => {
-                    this.plugin.settings.showComplexityScore = value;
-                    await this.plugin.saveSettings();
-                }));
-
         containerEl.createEl('h2', { text: 'Timeboxing' });
 
         new Setting(containerEl)
@@ -1073,44 +1096,8 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
         containerEl.createEl('p', { 
             text: `Your canvas must have a text card containing the start text (e.g., "${this.plugin.settings.startText}"). This card should point to the actual first playable node. The marker card itself will be skipped during playback.` 
         });
-
-        containerEl.createEl('h2', { text: 'Complexity Score Weights' });
-        containerEl.createEl('p', { text: 'Adjust how much each metric contributes to the complexity score.' });
-
-        const weights = this.plugin.settings.complexityWeights;
-        const weightKeys: (keyof ComplexityWeights)[] = [
-            'nodeCount', 'edgeCount', 'cyclomaticComplexity', 
-            'branchingFactor', 'logicDensity', 'variableCount', 'contentVolume'
-        ];
-
-        for (const key of weightKeys) {
-             new Setting(containerEl)
-                .setName(this.formatKey(key))
-                .addSlider(slider => slider
-                    .setLimits(0, 10, 0.1)
-                    .setValue(weights[key])
-                    .setDynamicTooltip()
-                    .onChange(async (value) => {
-                        weights[key] = value;
-                        await this.plugin.saveSettings();
-                    }));
-        }
-        
-        new Setting(containerEl)
-            .setName('Restore Default Weights')
-            .addButton(btn => btn
-                .setButtonText('Restore')
-                .onClick(async () => {
-                    this.plugin.settings.complexityWeights = Object.assign({}, DEFAULT_COMPLEXITY_WEIGHTS);
-                    await this.plugin.saveSettings();
-                    this.display();
-                }));
     }
 
-    formatKey(key: string): string {
-        // CamelCase to readable string
-        return key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
-    }
 }
 
 class CanvasPlayerModal extends Modal {
