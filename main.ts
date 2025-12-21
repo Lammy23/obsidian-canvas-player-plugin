@@ -6,6 +6,7 @@ import { ComplexityCalculator } from './complexity';
 import { extractNodeInfo, transformNode, convertCardToGroup, convertGroupToCard } from './canvasTransforms';
 import { NodeTimerController, TimingData } from './timeboxing';
 import { loadTimingForNode, saveTimingForNode } from './timingStorage';
+import { PluginData, ResumeSession, ResumeStackFrame, validateResumeSession, restoreStackFromResume } from './resumeStorage';
 
 export default class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
@@ -22,13 +23,16 @@ export default class CanvasPlayerPlugin extends Plugin {
     currentCanvasFile: TFile | null = null;
     currentCanvasData: CanvasData | null = null;
     currentNodeForTimer: CanvasNode | null = null;
+    
+    // Resume session tracking
+    private rootCanvasFile: TFile | null = null; // Track root canvas for saving resume position
 
     private readonly actionableView = (view: ItemView): view is ItemView & {
         addAction(icon: string, title: string, callback: () => void): void;
     } => typeof (view as ItemView & { addAction?: unknown }).addAction === 'function';
 
     async onload() {
-        await this.loadSettings();
+        await this.loadPluginData();
 
         this.app.workspace.onLayoutReady(() => {
             this.refreshCanvasViewActions();
@@ -51,11 +55,24 @@ export default class CanvasPlayerPlugin extends Plugin {
 
         this.addCommand({
             id: 'play-canvas-command',
-            name: 'Play Current Canvas',
+            name: 'Play current canvas (from start)',
             checkCallback: (checking: boolean) => {
                 const activeFile = this.app.workspace.getActiveFile();
                 if (activeFile && activeFile.extension === 'canvas') {
                     if (!checking) this.playActiveCanvas();
+                    return true;
+                }
+                return false;
+            }
+        });
+
+        this.addCommand({
+            id: 'play-canvas-command-last',
+            name: 'Play current canvas (from last)',
+            checkCallback: (checking: boolean) => {
+                const activeFile = this.app.workspace.getActiveFile();
+                if (activeFile && activeFile.extension === 'canvas') {
+                    if (!checking) void this.playActiveCanvasFromLast();
                     return true;
                 }
                 return false;
@@ -154,8 +171,11 @@ export default class CanvasPlayerPlugin extends Plugin {
                 // Add Player buttons
                 if (!this.actionableView(view)) return;
                 if ((view as any)._hasCanvasPlayerButton) return;
-                view.addAction('play', 'Play Canvas', () => {
+                view.addAction('play', 'Play from start', () => {
                     this.playActiveCanvas();
+                });
+                view.addAction('play-circle', 'Play from last', () => {
+                    void this.playActiveCanvasFromLast();
                 });
                 view.addAction('zoom-in', 'Zoom to start', () => {
                     void this.zoomToStartOfActiveCanvas();
@@ -227,14 +247,46 @@ export default class CanvasPlayerPlugin extends Plugin {
         return targetNode || null;
     }
 
-    async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    async loadPluginData(): Promise<void> {
+        const rawData = await this.loadData();
+        
+        // Migration: if data is flat (old format), wrap it
+        if (rawData && !rawData.settings && !rawData.resumeSessions) {
+            // Old format: data is directly the settings object
+            const pluginData: PluginData = {
+                settings: rawData,
+                resumeSessions: {}
+            };
+            this.settings = Object.assign({}, DEFAULT_SETTINGS, pluginData.settings);
+            // Migrate: save new format
+            await this.saveData(pluginData);
+        } else {
+            // New format: has settings and resumeSessions
+            const pluginData = rawData as PluginData;
+            this.settings = Object.assign({}, DEFAULT_SETTINGS, pluginData?.settings || {});
+            
+            // Ensure resumeSessions exists
+            if (!pluginData?.resumeSessions) {
+                const updatedData: PluginData = {
+                    settings: this.settings,
+                    resumeSessions: {}
+                };
+                await this.saveData(updatedData);
+            }
+        }
+        
         // Ensure nested objects are merged correctly
         this.settings.complexityWeights = Object.assign({}, DEFAULT_COMPLEXITY_WEIGHTS, this.settings.complexityWeights);
     }
 
-    async saveSettings() {
-        await this.saveData(this.settings);
+    async savePluginData(): Promise<void> {
+        const currentData = (await this.loadData()) as PluginData | null;
+        const pluginData: PluginData = {
+            settings: this.settings,
+            resumeSessions: currentData?.resumeSessions || {}
+        };
+        await this.saveData(pluginData);
+        
         // Refresh UI based on new settings
         this.refreshCanvasViewActions();
         
@@ -245,12 +297,50 @@ export default class CanvasPlayerPlugin extends Plugin {
         }
     }
 
+    async saveResumeSession(rootFilePath: string, session: ResumeSession): Promise<void> {
+        const currentData = (await this.loadData()) as PluginData | null;
+        const pluginData: PluginData = {
+            settings: this.settings,
+            resumeSessions: { ...(currentData?.resumeSessions || {}), [rootFilePath]: session }
+        };
+        await this.saveData(pluginData);
+    }
+
+    async getResumeSession(rootFilePath: string): Promise<ResumeSession | null> {
+        const currentData = (await this.loadData()) as PluginData | null;
+        return currentData?.resumeSessions?.[rootFilePath] || null;
+    }
+
+    async clearResumeSession(rootFilePath: string): Promise<void> {
+        const currentData = (await this.loadData()) as PluginData | null;
+        if (!currentData?.resumeSessions) return;
+        
+        const { [rootFilePath]: _, ...remainingSessions } = currentData.resumeSessions;
+        const pluginData: PluginData = {
+            settings: this.settings,
+            resumeSessions: remainingSessions
+        };
+        await this.saveData(pluginData);
+    }
+
+    // Legacy methods for compatibility (redirect to new methods)
+    async loadSettings() {
+        await this.loadPluginData();
+    }
+
+    async saveSettings() {
+        await this.savePluginData();
+    }
+
     async playActiveCanvas() {
         const activeFile = this.app.workspace.getActiveFile();
         if (!activeFile || activeFile.extension !== 'canvas') {
             new Notice('Please open a Canvas file first.');
             return;
         }
+
+        // Reset root tracking for new session
+        this.rootCanvasFile = activeFile;
 
         const content = await this.app.vault.read(activeFile);
         const canvasData: CanvasData = JSON.parse(content);
@@ -263,6 +353,60 @@ export default class CanvasPlayerPlugin extends Plugin {
         }
 
         await this.playCanvasFromNode(activeFile, canvasData, startNode);
+    }
+
+    async playActiveCanvasFromLast() {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile || activeFile.extension !== 'canvas') {
+            new Notice('Please open a Canvas file first.');
+            return;
+        }
+
+        // Load resume session
+        const session = await this.getResumeSession(activeFile.path);
+        if (!session) {
+            new Notice('No saved position found for this canvas. Starting from the beginning.');
+            await this.playActiveCanvas();
+            return;
+        }
+
+        // Validate session
+        const validationError = await validateResumeSession(this.app, session);
+        if (validationError) {
+            new Notice(`Cannot resume: ${validationError}. Starting from the beginning.`);
+            await this.clearResumeSession(activeFile.path);
+            await this.playActiveCanvas();
+            return;
+        }
+
+        try {
+            // Set root tracking
+            this.rootCanvasFile = activeFile;
+
+            // Restore stack
+            this.stack = await restoreStackFromResume(this.app, session.stack);
+
+            // Load current canvas and node
+            const currentFile = this.app.vault.getAbstractFileByPath(session.currentFilePath);
+            if (!(currentFile instanceof TFile)) {
+                throw new Error(`Current file not found: ${session.currentFilePath}`);
+            }
+
+            const content = await this.app.vault.read(currentFile);
+            const canvasData: CanvasData = JSON.parse(content);
+            const currentNode = canvasData.nodes.find(n => n.id === session.currentNodeId);
+            if (!currentNode) {
+                throw new Error(`Node not found: ${session.currentNodeId}`);
+            }
+
+            // Start playback at saved node with restored state and stack
+            await this.playCanvasFromNode(currentFile, canvasData, currentNode, session.currentSessionState, this.stack);
+        } catch (error) {
+            console.error('Canvas Player: failed to resume session', error);
+            new Notice(`Failed to resume session: ${error instanceof Error ? error.message : 'Unknown error'}. Starting from the beginning.`);
+            await this.clearResumeSession(activeFile.path);
+            await this.playActiveCanvas();
+        }
     }
 
     addTransformMenuItems(menu: Menu, node: any) {
@@ -343,15 +487,33 @@ export default class CanvasPlayerPlugin extends Plugin {
         }
     }
 
-    async playCanvasFromNode(canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode) {
-        // Clear stack if starting a new session from scratch (unless we are recursing)
-        // If this is called from the play command, we might want to reset.
-        // For now, assume manual calls reset the stack unless handled internally.
-        
+    async playCanvasFromNode(canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode, initialState?: GameState, initialStack?: StackFrame[]) {
+        // If rootCanvasFile is not set, this is a new session (not a resume)
+        const isNewSession = !this.rootCanvasFile;
+        if (isNewSession) {
+            this.rootCanvasFile = canvasFile;
+        }
+
         if (this.settings.mode === 'modal') {
-            new CanvasPlayerModal(this, canvasFile, canvasData, startNode).open();
+            new CanvasPlayerModal(this, canvasFile, canvasData, startNode, initialState, initialStack, this.rootCanvasFile).open();
         } else {
-            this.startCameraMode(canvasData, startNode);
+            // For camera mode, restore state/stack if provided (resume), otherwise reset (new session)
+            if (initialState) {
+                this.currentSessionState = { ...initialState };
+            } else if (isNewSession) {
+                this.currentSessionState = {}; // Reset for new session
+            }
+            if (initialStack) {
+                this.stack = initialStack.map(frame => ({
+                    file: frame.file,
+                    data: frame.data,
+                    currentNode: frame.currentNode,
+                    state: { ...frame.state }
+                }));
+            } else if (isNewSession) {
+                this.stack = []; // Reset for new session
+            }
+            await this.startCameraMode(canvasData, startNode);
         }
     }
 
@@ -390,12 +552,9 @@ export default class CanvasPlayerPlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(ItemView);
         if (!view || view.getViewType() !== 'canvas') return;
 
-        // Don't reset stack here if we are navigating? 
-        // Actually startCameraMode is usually the entry point.
-        // If we are navigating, we handle stack elsewhere.
-        if (this.stack.length === 0) {
-            this.currentSessionState = {}; // Reset state for new session only at root
-        }
+        // State and stack are managed by playCanvasFromNode:
+        // - For new sessions: state/stack are empty (already reset)
+        // - For resume: state/stack are restored before calling this method
 
         await this.createHud(view, data, startNode);
         
@@ -432,7 +591,7 @@ export default class CanvasPlayerPlugin extends Plugin {
         
         const closeBtn = topControls.createEl('button', { text: 'Stop Playing', cls: 'canvas-hud-close' });
         closeBtn.onclick = () => {
-           this.stopCameraMode();
+           void this.stopCameraMode();
         };
 
         const choicesContainer = hudEl.createDiv({ cls: 'canvas-hud-choices' });
@@ -520,7 +679,26 @@ export default class CanvasPlayerPlugin extends Plugin {
         this.cameraTimer = null;
     }
 
-    stopCameraMode() {
+    async stopCameraMode() {
+         // Save resume session before stopping
+         if (this.rootCanvasFile && this.currentCanvasFile && this.currentCanvasData && this.currentNodeForTimer) {
+             const resumeStack: ResumeStackFrame[] = this.stack.map(frame => ({
+                 filePath: frame.file.path,
+                 currentNodeId: frame.currentNode.id,
+                 state: { ...frame.state }
+             }));
+
+             const session: ResumeSession = {
+                 rootFilePath: this.rootCanvasFile.path,
+                 currentFilePath: this.currentCanvasFile.path,
+                 currentNodeId: this.currentNodeForTimer.id,
+                 currentSessionState: { ...this.currentSessionState },
+                 stack: resumeStack
+             };
+
+             await this.saveResumeSession(this.rootCanvasFile.path, session);
+         }
+
          // Abort timer (don't save)
          if (this.cameraTimer) {
              this.cameraTimer.abort();
@@ -535,6 +713,7 @@ export default class CanvasPlayerPlugin extends Plugin {
          this.currentCanvasFile = null;
          this.currentCanvasData = null;
          this.currentNodeForTimer = null;
+         this.rootCanvasFile = null;
     }
 
     async renderChoicesInHud(view: ItemView, data: CanvasData, currentNode: CanvasNode, container: HTMLElement) {
@@ -612,7 +791,7 @@ export default class CanvasPlayerPlugin extends Plugin {
                     .onClick(async () => {
                         // Finish and save timer before stopping
                         await this.finishTimerForCurrentNode();
-                        this.stopCameraMode();
+                        await this.stopCameraMode();
                     })
                     .buttonEl.addClass('mod-cta');
             }
@@ -727,7 +906,7 @@ export default class CanvasPlayerPlugin extends Plugin {
         
         const frame = this.stack.pop();
         if (!frame) {
-            this.stopCameraMode();
+            await this.stopCameraMode();
             return;
         }
 
@@ -943,17 +1122,49 @@ class CanvasPlayerModal extends Modal {
     private state: GameState = {};
     private stack: StackFrame[] = [];
     private modalTimer: NodeTimerController | null = null;
+    private rootCanvasFile: TFile; // Track root canvas for resume saving
 
-    constructor(plugin: CanvasPlayerPlugin, canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode) {
+    constructor(plugin: CanvasPlayerPlugin, canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode, initialState?: GameState, initialStack?: StackFrame[], rootCanvasFile?: TFile) {
         super(plugin.app);
         this.plugin = plugin;
         this.canvasFile = canvasFile;
         this.canvasData = canvasData;
         this.currentNode = startNode;
+        if (initialState) {
+            this.state = { ...initialState };
+        }
+        if (initialStack) {
+            this.stack = initialStack.map(frame => ({
+                file: frame.file,
+                data: frame.data,
+                currentNode: frame.currentNode,
+                state: { ...frame.state }
+            }));
+        }
+        this.rootCanvasFile = rootCanvasFile || canvasFile;
     }
 
     onOpen() { this.renderScene(); }
-    onClose() { 
+    async onClose() { 
+        // Save resume session before closing
+        if (this.rootCanvasFile) {
+            const resumeStack: ResumeStackFrame[] = this.stack.map(frame => ({
+                filePath: frame.file.path,
+                currentNodeId: frame.currentNode.id,
+                state: { ...frame.state }
+            }));
+
+            const session: ResumeSession = {
+                rootFilePath: this.rootCanvasFile.path,
+                currentFilePath: this.canvasFile.path,
+                currentNodeId: this.currentNode.id,
+                currentSessionState: { ...this.state },
+                stack: resumeStack
+            };
+
+            await this.plugin.saveResumeSession(this.rootCanvasFile.path, session);
+        }
+
         // Abort timer on close (don't save)
         if (this.modalTimer) {
             this.modalTimer.abort();
