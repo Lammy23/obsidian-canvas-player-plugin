@@ -7,8 +7,11 @@ import { NodeTimerController, TimingData } from './timeboxing';
 import { loadTimingForNode, saveTimingForNode } from './timingStorage';
 import { PluginData, ResumeSession, ResumeStackFrame, validateResumeSession, restoreStackFromResume } from './resumeStorage';
 import { resetTimeboxingRecursive } from './timeboxingReset';
+import { SharedCountdownTimer, formatRemainingTime } from './sharedCountdownTimer';
+import { ActiveSession, createActiveSession, cloneActiveSession } from './playerSession';
+import { CanvasPlayerMiniView, CANVAS_PLAYER_MINI_VIEW_TYPE } from './miniPlayerView';
 
-export default class CanvasPlayerPlugin extends Plugin {
+export class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
     activeHud: HTMLElement | null = null; 
     activeOverlay: HTMLElement | null = null;
@@ -18,7 +21,7 @@ export default class CanvasPlayerPlugin extends Plugin {
     // Map to track reset stats button elements per view
     resetStatsElements: Map<ItemView, HTMLElement> = new Map();
     
-    // Timer state for Camera Mode
+    // Timer state for Camera Mode (legacy, will migrate to shared timer)
     cameraTimer: NodeTimerController | null = null;
     currentCanvasFile: TFile | null = null;
     currentCanvasData: CanvasData | null = null;
@@ -27,12 +30,38 @@ export default class CanvasPlayerPlugin extends Plugin {
     // Resume session tracking
     private rootCanvasFile: TFile | null = null; // Track root canvas for saving resume position
 
+    // Active session management (for minimize/restore)
+    activeSession: ActiveSession | null = null;
+    sharedTimer: SharedCountdownTimer = new SharedCountdownTimer();
+    activeModal: CanvasPlayerModal | null = null; // Track if modal is open
+    statusBarItem: HTMLElement | null = null; // Status bar timer item
+    statusBarUnsubscribe: (() => void) | null = null; // Timer subscription for status bar
+
     private readonly actionableView = (view: ItemView): view is ItemView & {
         addAction(icon: string, title: string, callback: () => void): void;
     } => typeof (view as ItemView & { addAction?: unknown }).addAction === 'function';
 
     async onload() {
         await this.loadPluginData();
+
+        // Register mini-player view
+        this.registerView(
+            CANVAS_PLAYER_MINI_VIEW_TYPE,
+            (leaf) => new CanvasPlayerMiniView(leaf, this)
+        );
+
+        // Initialize status bar item (initially hidden)
+        this.statusBarItem = this.addStatusBarItem();
+        this.statusBarItem.addClass('canvas-player-statusbar-item');
+        this.statusBarItem.hide();
+        this.statusBarItem.onClickEvent(() => {
+            void this.restorePlayer();
+        });
+        
+        // Subscribe status bar to timer updates
+        this.statusBarUnsubscribe = this.sharedTimer.subscribe(() => {
+            this.updateStatusBar();
+        });
 
         this.app.workspace.onLayoutReady(() => {
             this.refreshCanvasViewActions();
@@ -81,6 +110,43 @@ export default class CanvasPlayerPlugin extends Plugin {
             }
         });
 
+        // Commands for minimized player
+        this.addCommand({
+            id: 'canvas-player-restore',
+            name: 'Restore Canvas Player',
+            checkCallback: (checking: boolean) => {
+                if (this.activeSession) {
+                    if (!checking) void this.restorePlayer();
+                    return true;
+                }
+                return false;
+            }
+        });
+
+        this.addCommand({
+            id: 'canvas-player-stop',
+            name: 'Stop Canvas Player',
+            checkCallback: (checking: boolean) => {
+                if (this.activeSession) {
+                    if (!checking) void this.stopActiveSession();
+                    return true;
+                }
+                return false;
+            }
+        });
+
+        this.addCommand({
+            id: 'canvas-player-minimize',
+            name: 'Minimize Canvas Player',
+            checkCallback: (checking: boolean) => {
+                if (this.activeModal) {
+                    if (!checking) void this.minimizePlayer();
+                    return true;
+                }
+                return false;
+            }
+        });
+
         this.addSettingTab(new CanvasPlayerSettingTab(this.app, this));
 
         // Register context menu for canvas nodes
@@ -116,6 +182,29 @@ export default class CanvasPlayerPlugin extends Plugin {
             this.cameraTimer.abort();
             this.cameraTimer = null;
         }
+        
+        // Clean up shared timer
+        this.sharedTimer.abort();
+        
+        // Unsubscribe status bar
+        if (this.statusBarUnsubscribe) {
+            this.statusBarUnsubscribe();
+            this.statusBarUnsubscribe = null;
+        }
+        
+        // Close active modal if any
+        if (this.activeModal) {
+            this.activeModal.close();
+            this.activeModal = null;
+        }
+        
+        // Clear active session
+        this.activeSession = null;
+        
+        // Hide status bar
+        if (this.statusBarItem) {
+            this.statusBarItem.hide();
+        }
     }
 
     // ... existing code ...
@@ -140,11 +229,10 @@ export default class CanvasPlayerPlugin extends Plugin {
             if (!this.resetStatsElements.has(view) && actionsContainer) {
             const file = ((view as any).file as TFile | null) ?? undefined;
             if (file && file.extension === "canvas") {
-                const resetBtn = createEl("button", {
-                cls: "canvas-reset-stats-btn",
-                text: "Reset stats",
-                attr: { "aria-label": "Reset timeboxing stats for this canvas" },
-                });
+                const resetBtn = document.createElement("button");
+                resetBtn.textContent = "Reset stats";
+                resetBtn.className = "canvas-reset-stats-btn";
+                resetBtn.setAttribute("aria-label", "Reset timeboxing stats for this canvas");
                 resetBtn.style.marginRight = "10px";
                 resetBtn.style.fontSize = "0.85em";
                 resetBtn.style.padding = "4px 8px";
@@ -468,7 +556,38 @@ export default class CanvasPlayerPlugin extends Plugin {
         }
 
         if (this.settings.mode === 'modal') {
-            new CanvasPlayerModal(this, canvasFile, canvasData, startNode, initialState, initialStack, this.rootCanvasFile ?? undefined).open();
+            // Create active session for modal mode
+            const rootFile = this.rootCanvasFile ?? canvasFile;
+            let timerDurationMs = 0;
+            
+            if (this.settings.enableTimeboxing) {
+                const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
+                const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
+                timerDurationMs = timingData ? timingData.avgMs : defaultMs;
+            }
+            
+            this.activeSession = createActiveSession(
+                rootFile,
+                canvasFile,
+                canvasData,
+                startNode,
+                initialState,
+                initialStack,
+                timerDurationMs
+            );
+            
+            // Start shared timer if timeboxing is enabled
+            if (this.settings.enableTimeboxing && timerDurationMs > 0) {
+                this.sharedTimer.start(timerDurationMs);
+            }
+            
+            // Update status bar
+            this.updateStatusBar();
+            
+            // Ensure mini view is available (will be opened on minimize)
+            const modal = new CanvasPlayerModal(this, canvasFile, canvasData, startNode, initialState, initialStack, rootFile);
+            this.activeModal = modal;
+            modal.open();
         } else {
             // For camera mode, restore state/stack if provided (resume), otherwise reset (new session)
             if (initialState) {
@@ -969,6 +1088,369 @@ export default class CanvasPlayerPlugin extends Plugin {
             });
         }
     }
+
+    // ========== Active Session Management Methods ==========
+
+    /**
+     * Update status bar display based on active session state.
+     */
+    updateStatusBar() {
+        if (!this.statusBarItem) return;
+        
+        if (!this.activeSession) {
+            this.statusBarItem.hide();
+            return;
+        }
+        
+        if (!this.settings.enableTimeboxing) {
+            this.statusBarItem.hide();
+            return;
+        }
+        
+        this.statusBarItem.show();
+        const remainingMs = this.sharedTimer.getRemainingMs();
+        const formatted = formatRemainingTime(remainingMs);
+        this.statusBarItem.setText(`Canvas Player: ${formatted}`);
+    }
+
+    /**
+     * Minimize the player (close modal, open mini view).
+     */
+    async minimizePlayer() {
+        if (!this.activeSession) return;
+        
+        // Close modal (but keep session active)
+        if (this.activeModal) {
+            this.activeModal.close();
+            this.activeModal = null;
+        }
+        
+        // Ensure mini view is open
+        await this.ensureMiniViewOpen();
+    }
+
+    /**
+     * Restore the player (reopen modal).
+     */
+    async restorePlayer() {
+        if (!this.activeSession) return;
+        
+        // Reopen modal
+        const session = this.activeSession;
+        const modal = new CanvasPlayerModal(
+            this,
+            session.currentCanvasFile,
+            session.currentCanvasData,
+            session.currentNode,
+            session.state,
+            session.stack,
+            session.rootCanvasFile
+        );
+        this.activeModal = modal;
+        modal.open();
+    }
+
+    /**
+     * Ensure the mini-player view is open in the right sidebar.
+     */
+    async ensureMiniViewOpen() {
+        const leaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
+        if (leaves.length === 0) {
+            // Open in right sidebar
+            const leaf = this.app.workspace.getRightLeaf(false);
+            if (leaf) {
+                await leaf.setViewState({
+                    type: CANVAS_PLAYER_MINI_VIEW_TYPE,
+                    active: true
+                });
+            }
+        } else {
+            // Focus existing view
+            this.app.workspace.revealLeaf(leaves[0]);
+        }
+        
+        // Refresh mini view
+        const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
+        if (miniLeaves.length > 0) {
+            const miniView = miniLeaves[0].view as CanvasPlayerMiniView;
+            await miniView.refresh();
+        }
+    }
+
+    /**
+     * Stop the active session.
+     */
+    async stopActiveSession() {
+        if (!this.activeSession) return;
+        
+        // Save resume session before stopping
+        await this.saveResumeSession(this.activeSession.rootCanvasFile.path, {
+            rootFilePath: this.activeSession.rootCanvasFile.path,
+            currentFilePath: this.activeSession.currentCanvasFile.path,
+            currentNodeId: this.activeSession.currentNode.id,
+            currentSessionState: { ...this.activeSession.state },
+            stack: this.activeSession.stack.map(frame => ({
+                filePath: frame.file.path,
+                currentNodeId: frame.currentNode.id,
+                state: { ...frame.state }
+            }))
+        });
+        
+        // Finish and save timer for current node
+        if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
+            await this.finishTimerForActiveSession();
+        }
+        
+        // Clean up
+        this.sharedTimer.abort();
+        this.activeSession = null;
+        this.activeModal = null;
+        
+        // Update UI
+        this.updateStatusBar();
+        const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
+        miniLeaves.forEach(leaf => {
+            const miniView = leaf.view as CanvasPlayerMiniView;
+            miniView.refresh();
+        });
+    }
+
+    /**
+     * Navigate back in the session history.
+     */
+    async navigateBack() {
+        if (!this.activeSession || this.activeSession.history.length === 0) return;
+        
+        const previousNode = this.activeSession.history.pop();
+        if (!previousNode) return;
+        
+        // Finish timer for current node
+        if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
+            await this.finishTimerForActiveSession();
+        }
+        
+        // Update session
+        this.activeSession.currentNode = previousNode;
+        
+        // Start timer for previous node
+        if (this.settings.enableTimeboxing) {
+            await this.startTimerForActiveSession();
+        }
+        
+        // Update UI
+        await this.updateAllUIs();
+    }
+
+    /**
+     * Navigate to a specific node (from a choice).
+     */
+    async navigateToNode(parsedChoice: any, nextNode: CanvasNode) {
+        if (!this.activeSession) return;
+        
+        // Finish timer for current node
+        if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
+            await this.finishTimerForActiveSession();
+        }
+        
+        // Update state
+        LogicEngine.updateState(parsedChoice, this.activeSession.state);
+        
+        // Push current node to history
+        this.activeSession.history.push(this.activeSession.currentNode);
+        
+        // Check if next node is a canvas file (dive into nested canvas)
+        if (nextNode.type === 'file' && nextNode.file && nextNode.file.endsWith('.canvas')) {
+            await this.diveIntoCanvasForSession(nextNode);
+            return;
+        }
+        
+        // Update to next node
+        this.activeSession.currentNode = nextNode;
+        
+        // Start timer for next node
+        if (this.settings.enableTimeboxing) {
+            await this.startTimerForActiveSession();
+        }
+        
+        // Update UI
+        await this.updateAllUIs();
+    }
+
+    /**
+     * Navigate return to parent canvas (pop stack).
+     */
+    async navigateReturnToParent() {
+        if (!this.activeSession || this.activeSession.stack.length === 0) {
+            await this.stopActiveSession();
+            return;
+        }
+        
+        // Finish timer for current node
+        if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
+            await this.finishTimerForActiveSession();
+        }
+        
+        const frame = this.activeSession.stack.pop();
+        if (!frame) {
+            await this.stopActiveSession();
+            return;
+        }
+        
+        // Restore parent context
+        this.activeSession.currentCanvasFile = frame.file;
+        this.activeSession.currentCanvasData = frame.data;
+        this.activeSession.currentNode = frame.currentNode;
+        this.activeSession.state = frame.state;
+        this.activeSession.history = [];
+        
+        // Start timer for restored node
+        if (this.settings.enableTimeboxing) {
+            await this.startTimerForActiveSession();
+        }
+        
+        // Update UI
+        await this.updateAllUIs();
+    }
+
+    /**
+     * Dive into a nested canvas file.
+     */
+    private async diveIntoCanvasForSession(fileNode: CanvasNode) {
+        if (!this.activeSession) return;
+        
+        const filePath = fileNode.file;
+        if (!filePath) return;
+        
+        const targetFile = this.app.metadataCache.getFirstLinkpathDest(
+            filePath,
+            this.activeSession.currentCanvasFile.path
+        );
+        
+        if (!targetFile || targetFile.extension !== 'canvas') {
+            new Notice(`Could not find canvas file: ${filePath}`);
+            return;
+        }
+        
+        // Push to stack
+        this.activeSession.stack.push({
+            file: this.activeSession.currentCanvasFile,
+            data: this.activeSession.currentCanvasData,
+            currentNode: fileNode,
+            state: { ...this.activeSession.state }
+        });
+        
+        // Reset state for isolated scope
+        this.activeSession.state = {};
+        
+        // Load new canvas
+        this.activeSession.currentCanvasFile = targetFile;
+        const content = await this.app.vault.read(targetFile);
+        this.activeSession.currentCanvasData = JSON.parse(content);
+        
+        const startNode = this.getStartNode(this.activeSession.currentCanvasData);
+        if (!startNode) {
+            new Notice(`Cannot start embedded canvas: Could not find a text card containing "${this.settings.startText}" that points to a playable node.`);
+            await this.navigateReturnToParent();
+            return;
+        }
+        
+        this.activeSession.currentNode = startNode;
+        this.activeSession.history = [];
+        
+        // Start timer for new node
+        if (this.settings.enableTimeboxing) {
+            await this.startTimerForActiveSession();
+        }
+        
+        // Update UI
+        await this.updateAllUIs();
+    }
+
+    /**
+     * Start timer for the current node in active session.
+     */
+    private async startTimerForActiveSession() {
+        if (!this.activeSession || !this.settings.enableTimeboxing) return;
+        
+        const timingData = await loadTimingForNode(
+            this.app,
+            this.activeSession.currentCanvasFile,
+            this.activeSession.currentNode,
+            this.activeSession.currentCanvasData
+        );
+        const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
+        const durationMs = timingData ? timingData.avgMs : defaultMs;
+        
+        this.activeSession.timerDurationMs = durationMs;
+        this.activeSession.timerStartTimeMs = Date.now();
+        this.sharedTimer.start(durationMs);
+        
+        this.updateStatusBar();
+    }
+
+    /**
+     * Finish and save timer for current node in active session.
+     */
+    private async finishTimerForActiveSession() {
+        if (!this.activeSession || !this.settings.enableTimeboxing || !this.sharedTimer.isRunning()) {
+            return;
+        }
+        
+        const elapsedMs = this.sharedTimer.finish();
+        
+        // Load existing timing or start fresh
+        const existingTiming = await loadTimingForNode(
+            this.app,
+            this.activeSession.currentCanvasFile,
+            this.activeSession.currentNode,
+            this.activeSession.currentCanvasData
+        );
+        
+        let newTiming: TimingData;
+        if (existingTiming) {
+            newTiming = NodeTimerController.updateAverage(
+                existingTiming.avgMs,
+                existingTiming.samples,
+                elapsedMs
+            );
+        } else {
+            newTiming = { avgMs: elapsedMs, samples: 1 };
+        }
+        
+        // Save timing back
+        const canvasNeedsSave = await saveTimingForNode(
+            this.app,
+            this.activeSession.currentCanvasFile,
+            this.activeSession.currentNode,
+            this.activeSession.currentCanvasData,
+            newTiming
+        );
+        
+        if (canvasNeedsSave) {
+            const content = JSON.stringify(this.activeSession.currentCanvasData, null, 2);
+            await this.app.vault.modify(this.activeSession.currentCanvasFile, content);
+        }
+    }
+
+    /**
+     * Update all UIs (modal if open, mini view, status bar).
+     */
+    private async updateAllUIs() {
+        // Update modal if open
+        if (this.activeModal) {
+            await this.activeModal.refreshScene();
+        }
+        
+        // Update mini view
+        const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
+        miniLeaves.forEach(leaf => {
+            const miniView = leaf.view as CanvasPlayerMiniView;
+            miniView.refresh();
+        });
+        
+        // Update status bar
+        this.updateStatusBar();
+    }
 }
 
 class ConfirmResetTimeboxingModal extends Modal {
@@ -1110,66 +1592,76 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
 }
 
 class CanvasPlayerModal extends Modal {
-    canvasData: CanvasData;
-    currentNode: CanvasNode;
-    private history: CanvasNode[] = [];
     private plugin: CanvasPlayerPlugin;
-    private canvasFile: TFile;
-    private state: GameState = {};
-    private stack: StackFrame[] = [];
-    private modalTimer: NodeTimerController | null = null;
-    private rootCanvasFile: TFile; // Track root canvas for resume saving
+    private timerEl: HTMLElement | null = null;
+    private timerUnsubscribe: (() => void) | null = null;
 
     constructor(plugin: CanvasPlayerPlugin, canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode, initialState?: GameState, initialStack?: StackFrame[], rootCanvasFile?: TFile) {
         super(plugin.app);
         this.plugin = plugin;
-        this.canvasFile = canvasFile;
-        this.canvasData = canvasData;
-        this.currentNode = startNode;
-        if (initialState) {
-            this.state = { ...initialState };
-        }
-        if (initialStack) {
-            this.stack = initialStack.map(frame => ({
-                file: frame.file,
-                data: frame.data,
-                currentNode: frame.currentNode,
-                state: { ...frame.state }
-            }));
-        }
-        this.rootCanvasFile = rootCanvasFile || canvasFile;
+        // Note: activeSession is created by plugin.playCanvasFromNode before opening modal
     }
 
-    onOpen() { this.renderScene(); }
+    async onOpen() { 
+        await this.renderScene();
+        // Subscribe to timer updates if timeboxing is enabled (timerEl is set in renderScene)
+        if (this.plugin.settings.enableTimeboxing && this.timerEl) {
+            this.timerUnsubscribe = this.plugin.sharedTimer.subscribe((remainingMs) => {
+                this.updateTimerDisplay(remainingMs);
+            });
+        }
+    }
+    
     async onClose() { 
-        // Save resume session before closing
-        if (this.rootCanvasFile) {
-            const resumeStack: ResumeStackFrame[] = this.stack.map(frame => ({
-                filePath: frame.file.path,
-                currentNodeId: frame.currentNode.id,
-                state: { ...frame.state }
-            }));
-
-            const session: ResumeSession = {
-                rootFilePath: this.rootCanvasFile.path,
-                currentFilePath: this.canvasFile.path,
-                currentNodeId: this.currentNode.id,
-                currentSessionState: { ...this.state },
-                stack: resumeStack
-            };
-
-            await this.plugin.saveResumeSession(this.rootCanvasFile.path, session);
+        // Unsubscribe from timer
+        if (this.timerUnsubscribe) {
+            this.timerUnsubscribe();
+            this.timerUnsubscribe = null;
         }
-
-        // Abort timer on close (don't save)
-        if (this.modalTimer) {
-            this.modalTimer.abort();
-            this.modalTimer = null;
+        
+        // Clear modal reference
+        // Note: We don't save resume session here because:
+        // - If minimizing: minimizePlayer() doesn't clear activeSession, so we don't save here
+        // - If closing normally: stopActiveSession() will handle saving
+        // - If closing via escape/etc: session may still be active, but we'll save on next action
+        if (this.plugin.activeModal === this) {
+            this.plugin.activeModal = null;
         }
+        
         this.contentEl.empty(); 
+    }
+    
+    private updateTimerDisplay(remainingMs: number) {
+        if (!this.timerEl) return;
+        const formatted = formatRemainingTime(remainingMs);
+        this.timerEl.setText(formatted);
+        if (remainingMs < 0) {
+            this.timerEl.addClass('canvas-player-timer-negative');
+        } else {
+            this.timerEl.removeClass('canvas-player-timer-negative');
+        }
+    }
+    
+    async refreshScene() {
+        await this.renderScene();
+        // Re-subscribe to timer
+        if (this.timerUnsubscribe) {
+            this.timerUnsubscribe();
+        }
+        if (this.plugin.settings.enableTimeboxing && this.timerEl) {
+            this.timerUnsubscribe = this.plugin.sharedTimer.subscribe((remainingMs) => {
+                this.updateTimerDisplay(remainingMs);
+            });
+        }
     }
 
     async renderScene() {
+        const session = this.plugin.activeSession;
+        if (!session) {
+            this.close();
+            return;
+        }
+        
         const { contentEl } = this;
         contentEl.empty();
         const container = contentEl.createDiv({ cls: 'canvas-player-container' });
@@ -1178,44 +1670,35 @@ class CanvasPlayerModal extends Modal {
         
         new ButtonComponent(controls)
             .setButtonText('Back')
-            .setDisabled(this.history.length === 0)
+            .setDisabled(session.history.length === 0)
             .onClick(async () => {
-                // Abort timer on Back (don't save)
-                if (this.modalTimer) {
-                    this.modalTimer.abort();
-                    this.modalTimer = null;
-                }
-                
-                const previous = this.history.pop();
-                if (previous) {
-                    this.currentNode = previous;
-                    await this.renderScene();
-                }
+                await this.plugin.navigateBack();
             });
 
         new ButtonComponent(controls)
             .setButtonText('Edit')
             .onClick(() => {
-                // Abort timer on Edit (don't save)
-                if (this.modalTimer) {
-                    this.modalTimer.abort();
-                    this.modalTimer = null;
-                }
                 void this.openNodeForEditing();
             });
         
+        // Minimize button
+        new ButtonComponent(controls)
+            .setButtonText('Minimize')
+            .onClick(async () => {
+                await this.plugin.minimizePlayer();
+            });
+        
         // Timer display (top-right) - created after buttons so it appears on the right, only if enabled
-        let timerEl: HTMLElement | null = null;
+        this.timerEl = null;
         if (this.plugin.settings.enableTimeboxing) {
-            timerEl = controls.createDiv({ cls: 'canvas-player-timer' });
-            timerEl.setText('--:--');
-            // Start timer for current node
-            await this.startTimerForNode(timerEl);
+            this.timerEl = controls.createDiv({ cls: 'canvas-player-timer' });
+            const remainingMs = this.plugin.sharedTimer.getRemainingMs();
+            this.updateTimerDisplay(remainingMs);
         }
 
         // Handle File Nodes (Display Content)
-        if (this.currentNode.type === 'file' && this.currentNode.file) {
-            const file = this.app.metadataCache.getFirstLinkpathDest(this.currentNode.file, this.canvasFile.path);
+        if (session.currentNode.type === 'file' && session.currentNode.file) {
+            const file = this.app.metadataCache.getFirstLinkpathDest(session.currentNode.file, session.currentCanvasFile.path);
             if (file instanceof TFile) {
                 if (file.extension !== 'canvas') {
                      // Markdown files
@@ -1229,23 +1712,22 @@ class CanvasPlayerModal extends Modal {
                     );
                 } else {
                     // Canvas files (Placeholder if not diving in)
-                    // Or we could just say "Nested Canvas: Name"
                     textContainer.createEl('h3', { text: `Nested Canvas: ${file.basename}` });
                 }
             } else {
-                textContainer.setText(`File not found: ${this.currentNode.file}`);
+                textContainer.setText(`File not found: ${session.currentNode.file}`);
             }
         } else {
             await MarkdownRenderer.render(
                 this.app,
-                this.currentNode.text || "...",
+                session.currentNode.text || "...",
                 textContainer,
                 "/",
                 this as unknown as Component
             );
         }
 
-        const rawChoices = this.canvasData.edges.filter(edge => edge.fromNode === this.currentNode.id);
+        const rawChoices = session.currentCanvasData.edges.filter(edge => edge.fromNode === session.currentNode.id);
         
         // 1. Pre-parse and check for missing variables
         const parsedChoices = rawChoices.map(edge => {
@@ -1255,7 +1737,7 @@ class CanvasPlayerModal extends Modal {
 
         const missingVars = new Set<string>();
         parsedChoices.forEach(item => {
-            const missing = LogicEngine.getMissingVariables(item.parsed, this.state);
+            const missing = LogicEngine.getMissingVariables(item.parsed, session.state);
             missing.forEach(v => missingVars.add(v));
         });
 
@@ -1266,13 +1748,13 @@ class CanvasPlayerModal extends Modal {
             promptContainer.createEl('h3', { text: 'Set values for missing variables:' });
 
             missingVars.forEach(variable => {
-                if (this.state[variable] === undefined) this.state[variable] = false;
+                if (session.state[variable] === undefined) session.state[variable] = false;
 
                 new Setting(promptContainer)
                     .setName(variable)
                     .addToggle(toggle => toggle
-                        .setValue(this.state[variable])
-                        .onChange(val => this.state[variable] = val)
+                        .setValue(session.state[variable])
+                        .onChange(val => session.state[variable] = val)
                     );
             });
 
@@ -1285,191 +1767,52 @@ class CanvasPlayerModal extends Modal {
             return; // Stop rendering regular choices
         }
 
-        const validChoices = parsedChoices.filter(item => LogicEngine.checkConditions(item.parsed, this.state));
+        const validChoices = parsedChoices.filter(item => LogicEngine.checkConditions(item.parsed, session.state));
 
         if (validChoices.length === 0) {
-            if (this.stack.length > 0) {
+            if (session.stack.length > 0) {
                 new ButtonComponent(buttonContainer)
                     .setButtonText("Return to Parent Canvas")
                     .setCta()
                     .onClick(async () => {
-                         await this.finishTimerForCurrentNode();
-                         await this.returnToParent();
+                         await this.plugin.navigateReturnToParent();
                     })
                     .buttonEl.addClass('mod-cta');
             } else {
                 new ButtonComponent(buttonContainer).setButtonText("End of Path").onClick(async () => {
-                    await this.finishTimerForCurrentNode();
+                    await this.plugin.stopActiveSession();
                     this.close();
                 });
             }
         } else {
             validChoices.forEach(choice => {
-                const nextNode = this.canvasData.nodes.find(n => n.id === choice.edge.toNode);
+                const nextNode = session.currentCanvasData.nodes.find(n => n.id === choice.edge.toNode);
                 const lbl = choice.parsed.text || "Next";
                 new ButtonComponent(buttonContainer).setButtonText(lbl).onClick(async () => {
                     if (nextNode) {
-                        // Finish and save timer for current node
-                        await this.finishTimerForCurrentNode();
-                        
-                        LogicEngine.updateState(choice.parsed, this.state);
-                        
-                        // Check if next node is a Canvas file
-                        if (nextNode.type === 'file' && nextNode.file && nextNode.file.endsWith('.canvas')) {
-                            await this.diveIntoCanvas(nextNode);
-                            return;
-                        }
-
-                        this.history.push(this.currentNode);
-                        this.currentNode = nextNode;
-                        await this.renderScene();
+                        await this.plugin.navigateToNode(choice.parsed, nextNode);
                     }
                 });
             });
         }
     }
 
-    async startTimerForNode(timerEl: HTMLElement) {
-        // Only start timer if timeboxing is enabled
-        if (!this.plugin.settings.enableTimeboxing) {
-            return;
-        }
-
-        // Abort any existing timer
-        if (this.modalTimer) {
-            this.modalTimer.abort();
-            this.modalTimer = null;
-        }
-
-        // Load timing data for this node
-        const timingData = await loadTimingForNode(this.app, this.canvasFile, this.currentNode, this.canvasData);
-        const defaultMs = this.plugin.settings.defaultNodeDurationMinutes * 60 * 1000;
-        const initialMs = timingData ? timingData.avgMs : defaultMs;
-
-        // Create and start timer
-        this.modalTimer = new NodeTimerController();
-        this.modalTimer.start(initialMs, timerEl);
-    }
-
-    async finishTimerForCurrentNode(): Promise<void> {
-        // Only finish timer if timeboxing is enabled
-        if (!this.plugin.settings.enableTimeboxing || !this.modalTimer) {
-            return;
-        }
-
-        const elapsedMs = this.modalTimer.finish();
-        
-        // Load existing timing or start fresh
-        const existingTiming = await loadTimingForNode(
-            this.app,
-            this.canvasFile,
-            this.currentNode,
-            this.canvasData
-        );
-
-        let newTiming: TimingData;
-        if (existingTiming) {
-            newTiming = NodeTimerController.updateAverage(
-                existingTiming.avgMs,
-                existingTiming.samples,
-                elapsedMs
-            );
-        } else {
-            newTiming = { avgMs: elapsedMs, samples: 1 };
-        }
-
-        // Save timing back
-        const canvasNeedsSave = await saveTimingForNode(
-            this.app,
-            this.canvasFile,
-            this.currentNode,
-            this.canvasData,
-            newTiming
-        );
-
-        // If canvas needs save (text nodes or fallback), write it
-        if (canvasNeedsSave) {
-            const content = JSON.stringify(this.canvasData, null, 2);
-            await this.app.vault.modify(this.canvasFile, content);
-        }
-
-        this.modalTimer = null;
-    }
-
-    private async diveIntoCanvas(fileNode: CanvasNode) {
-        // Finish and save timer for current file node before diving
-        await this.finishTimerForCurrentNode();
-        
-        const filePath = fileNode.file;
-        if (!filePath) return;
-
-        const targetFile = this.app.metadataCache.getFirstLinkpathDest(filePath, this.canvasFile.path);
-        
-        if (!targetFile || targetFile.extension !== 'canvas') {
-             new Notice(`Could not find canvas file: ${filePath}`);
-             return;
-        }
-
-        // Push to stack
-        this.stack.push({
-            file: this.canvasFile,
-            data: this.canvasData,
-            currentNode: fileNode,
-            state: Object.assign({}, this.state)
-        });
-
-        // Reset state for isolated scope
-        this.state = {};
-
-        // Load new file
-        this.canvasFile = targetFile;
-        const content = await this.app.vault.read(targetFile);
-        this.canvasData = JSON.parse(content);
-        
-        const startNode = this.plugin.getStartNode(this.canvasData);
-
-        if (startNode) {
-            this.currentNode = startNode;
-            // Clear history for the new canvas context (so back button doesn't jump across files weirdly)
-            // Or we can keep it if we want to back out of the file? 
-            // Current stack logic handles returning. So clearing history for this "session" is fine.
-            this.history = []; 
-            await this.renderScene();
-        } else {
-             new Notice(`Cannot start embedded canvas: Could not find a text card containing "${this.plugin.settings.startText}" that points to a playable node.`);
-             await this.returnToParent();
-        }
-    }
-
-    private async returnToParent() {
-        // Finish and save timer before returning (Return to parent is a save action)
-        await this.finishTimerForCurrentNode();
-        
-        const frame = this.stack.pop();
-        if (!frame) {
-            this.close();
-            return;
-        }
-
-        this.canvasFile = frame.file;
-        this.canvasData = frame.data;
-        this.currentNode = frame.currentNode;
-        this.state = frame.state;
-        this.history = []; // Reset history or restore? frame doesn't have history. 
-        
-        await this.renderScene();
-    }
 
     private async openNodeForEditing() {
+        const session = this.plugin.activeSession;
+        if (!session) return;
+        
         this.close();
         const leaf = this.app.workspace.getLeaf(false) ?? this.app.workspace.getLeaf(true);
         if (!leaf) return;
 
-        await leaf.openFile(this.canvasFile);
+        await leaf.openFile(session.currentCanvasFile);
         const view = leaf.view;
 
         if (view instanceof ItemView && view.getViewType() === 'canvas') {
-            this.plugin.zoomToNode(view, this.currentNode);
+            this.plugin.zoomToNode(view, session.currentNode);
         }
     }
 }
+
+export default CanvasPlayerPlugin;
