@@ -118,62 +118,71 @@ export default class CanvasPlayerPlugin extends Plugin {
         }
     }
 
+    // ... existing code ...
+
     refreshCanvasViewActions() {
         this.app.workspace.iterateAllLeaves((leaf) => {
-            if (leaf.view.getViewType() === 'canvas') {
-                const view = leaf.view as ItemView;
-                
-                // Add Reset Stats button if timeboxing is enabled
-                // @ts-ignore: headerEl is not in the public API but exists on ItemView
-                const actionsContainer = view.headerEl.querySelector('.view-actions');
-                if (this.settings.enableTimeboxing) {
-                    if (!this.resetStatsElements.has(view) && actionsContainer) {
-                        // @ts-ignore: file exists on ItemView but might be missing from type definition in some versions
-                        const file = (view.file as TFile | null) ?? undefined;
-                        if (file && file.extension === 'canvas') {
-                            const resetBtn = createEl('button', {
-                                cls: 'canvas-reset-stats-btn',
-                                text: 'Reset stats',
-                                attr: { 'aria-label': 'Reset timeboxing stats for this canvas' }
-                            });
-                            resetBtn.style.marginRight = '10px';
-                            resetBtn.style.fontSize = '0.85em';
-                            resetBtn.style.padding = '4px 8px';
-                            resetBtn.onclick = () => {
-                                new ConfirmResetTimeboxingModal(this.app, this, file).open();
-                            };
-                            
-                            // Insert before player buttons (they're added via addAction, so insert near the end of actionsContainer children)
-                            actionsContainer.insertBefore(resetBtn, actionsContainer.lastChild);
-                            this.resetStatsElements.set(view, resetBtn);
-                        }
-                    }
-                } else {
-                    // If disabled, remove any existing reset button elements
-                    const resetBtn = this.resetStatsElements.get(view);
-                    if (resetBtn) {
-                        resetBtn.remove();
-                        this.resetStatsElements.delete(view);
-                    }
-                }
-
-                // Add Player buttons
-                if (!this.actionableView(view)) return;
-                if ((view as any)._hasCanvasPlayerButton) return;
-                view.addAction('play', 'Play from start', () => {
-                    this.playActiveCanvas();
+        if (leaf.view.getViewType() !== 'canvas') return;
+    
+        const view = leaf.view as ItemView;
+    
+        // headerEl is not guaranteed across Obsidian versions/timing
+        const headerEl: HTMLElement | null =
+            ((view as any).headerEl as HTMLElement | undefined) ??
+            (view.containerEl?.querySelector?.(".view-header") as HTMLElement | null) ??
+            null;
+    
+        const actionsContainer =
+            headerEl?.querySelector?.(".view-actions") ?? null;
+    
+        // Add Reset Stats button if timeboxing is enabled
+        if (this.settings.enableTimeboxing) {
+            if (!this.resetStatsElements.has(view) && actionsContainer) {
+            const file = ((view as any).file as TFile | null) ?? undefined;
+            if (file && file.extension === "canvas") {
+                const resetBtn = createEl("button", {
+                cls: "canvas-reset-stats-btn",
+                text: "Reset stats",
+                attr: { "aria-label": "Reset timeboxing stats for this canvas" },
                 });
-                view.addAction('play-circle', 'Play from last', () => {
-                    void this.playActiveCanvasFromLast();
-                });
-                view.addAction('zoom-in', 'Zoom to start', () => {
-                    void this.zoomToStartOfActiveCanvas();
-                });
-                (view as any)._hasCanvasPlayerButton = true;
+                resetBtn.style.marginRight = "10px";
+                resetBtn.style.fontSize = "0.85em";
+                resetBtn.style.padding = "4px 8px";
+                resetBtn.onclick = () => {
+                new ConfirmResetTimeboxingModal(this.app, this, file).open();
+                };
+    
+                actionsContainer.insertBefore(resetBtn, actionsContainer.lastChild);
+                this.resetStatsElements.set(view, resetBtn);
             }
+            }
+        } else {
+            const resetBtn = this.resetStatsElements.get(view);
+            if (resetBtn) {
+            resetBtn.remove();
+            this.resetStatsElements.delete(view);
+            }
+        }
+    
+        // If there's no header yet, don't try to add actions (it may throw internally)
+        if (!headerEl) return;
+    
+        // Add Player buttons
+        if (!this.actionableView(view)) return;
+        if ((view as any)._hasCanvasPlayerButton) return;
+    
+        try {
+            view.addAction("play", "Play from start", () => this.playActiveCanvas());
+            view.addAction("play-circle", "Play from last", () => void this.playActiveCanvasFromLast());
+            view.addAction("zoom-in", "Zoom to start", () => void this.zoomToStartOfActiveCanvas());
+            (view as any)._hasCanvasPlayerButton = true;
+        } catch (e) {
+            console.warn("Canvas Player: failed to add canvas header actions", e);
+        }
         });
     }
-
+  
+  // ... existing code ...
 
     getStartNode(data: CanvasData): CanvasNode | null {
         const startText = this.settings.startText?.toLowerCase().trim();
