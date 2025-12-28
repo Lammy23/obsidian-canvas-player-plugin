@@ -1,5 +1,7 @@
 import { TFile } from 'obsidian';
-import { GameState } from './logic';
+import type { GameState } from './logic';
+
+export type { GameState } from './logic';
 
 export interface CanvasNode {
     id: string;

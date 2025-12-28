@@ -1,6 +1,6 @@
 import { App, TFile } from 'obsidian';
-import { CanvasNode, CanvasData } from './types';
-import { GameState, StackFrame } from './types';
+import type { CanvasNode, CanvasData, StackFrame } from './types';
+import type { GameState } from './logic';
 
 /**
  * Resume session snapshot for a canvas playback session.
