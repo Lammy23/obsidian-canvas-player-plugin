@@ -5,7 +5,7 @@ import { CanvasPlayerSettings, DEFAULT_SETTINGS } from './settings';
 import { extractNodeInfo, transformNode, convertCardToGroup, convertGroupToCard } from './canvasTransforms';
 import { NodeTimerController, TimingData } from './timeboxing';
 import { loadTimingForNode, saveTimingForNode } from './timingStorage';
-import { PluginData, ResumeSession, ResumeStackFrame, validateResumeSession, restoreStackFromResume } from './resumeStorage';
+import { PluginData, ResumeSession, ResumeStackFrame, PersistedActiveSession, validateResumeSession, restoreStackFromResume } from './resumeStorage';
 import { resetTimeboxingRecursive } from './timeboxingReset';
 import { SharedCountdownTimer, formatRemainingTime } from './sharedCountdownTimer';
 import { ActiveSession, createActiveSession, cloneActiveSession } from './playerSession';
@@ -33,6 +33,7 @@ export class CanvasPlayerPlugin extends Plugin {
 
     // Active session management (for minimize/restore)
     activeSession: ActiveSession | null = null;
+    activeSessionMode: 'modal' | 'camera' | null = null;
     sharedTimer: SharedCountdownTimer = new SharedCountdownTimer();
     activeModal: CanvasPlayerModal | null = null; // Track if modal is open
     cameraModeView: ItemView | null = null; // Track active camera mode view for restore
@@ -69,7 +70,11 @@ export class CanvasPlayerPlugin extends Plugin {
             this.updateStatusBar();
         });
 
-        this.app.workspace.onLayoutReady(() => {
+        this.app.workspace.onLayoutReady(async () => {
+            // Restore active session state (timer persistence) if present
+            if (this.settings.enableTimeboxing) {
+                await this.restoreActiveSessionState();
+            }
             this.refreshCanvasViewActions();
         });
 
@@ -343,7 +348,8 @@ export class CanvasPlayerPlugin extends Plugin {
             if (!pluginData?.resumeSessions) {
                 const updatedData: PluginData = {
                     settings: this.settings,
-                    resumeSessions: {}
+                    resumeSessions: {},
+                    activeSessionState: pluginData?.activeSessionState
                 };
                 await this.saveData(updatedData);
             }
@@ -362,7 +368,8 @@ export class CanvasPlayerPlugin extends Plugin {
         const currentData = (await this.loadData()) as PluginData | null;
         const pluginData: PluginData = {
             settings: this.settings,
-            resumeSessions: currentData?.resumeSessions || {}
+            resumeSessions: currentData?.resumeSessions || {},
+            activeSessionState: currentData?.activeSessionState
         };
         await this.saveData(pluginData);
         
@@ -374,7 +381,8 @@ export class CanvasPlayerPlugin extends Plugin {
         const currentData = (await this.loadData()) as PluginData | null;
         const pluginData: PluginData = {
             settings: this.settings,
-            resumeSessions: { ...(currentData?.resumeSessions || {}), [rootFilePath]: session }
+            resumeSessions: { ...(currentData?.resumeSessions || {}), [rootFilePath]: session },
+            activeSessionState: currentData?.activeSessionState
         };
         await this.saveData(pluginData);
     }
@@ -391,9 +399,131 @@ export class CanvasPlayerPlugin extends Plugin {
         const { [rootFilePath]: _, ...remainingSessions } = currentData.resumeSessions;
         const pluginData: PluginData = {
             settings: this.settings,
-            resumeSessions: remainingSessions
+            resumeSessions: remainingSessions,
+            activeSessionState: currentData?.activeSessionState
         };
         await this.saveData(pluginData);
+    }
+
+    /**
+     * Save the current active session state for timer persistence across restart.
+     * Only persists when timeboxing is enabled.
+     */
+    private async saveActiveSessionState(): Promise<void> {
+        const currentData = (await this.loadData()) as PluginData | null;
+
+        if (!this.settings.enableTimeboxing || !this.activeSession || !this.activeSessionMode) {
+            // Clear persisted state if it exists
+            if (currentData?.activeSessionState) {
+                const pluginData: PluginData = {
+                    settings: this.settings,
+                    resumeSessions: currentData?.resumeSessions || {},
+                    activeSessionState: undefined
+                };
+                await this.saveData(pluginData);
+            }
+            return;
+        }
+
+        const persisted: PersistedActiveSession = {
+            mode: this.activeSessionMode,
+            rootFilePath: this.activeSession.rootCanvasFile.path,
+            currentFilePath: this.activeSession.currentCanvasFile.path,
+            currentNodeId: this.activeSession.currentNode.id,
+            state: { ...this.activeSession.state },
+            stack: this.activeSession.stack.map(frame => ({
+                filePath: frame.file.path,
+                currentNodeId: frame.currentNode.id,
+                state: { ...frame.state }
+            })),
+            historyNodeIds: this.activeSession.history.map(n => n.id),
+            timerStartTimeMs: this.activeSession.timerStartTimeMs ?? Date.now(),
+            timerDurationMs: this.activeSession.timerDurationMs
+        };
+
+        const pluginData: PluginData = {
+            settings: this.settings,
+            resumeSessions: currentData?.resumeSessions || {},
+            activeSessionState: persisted
+        };
+        await this.saveData(pluginData);
+    }
+
+    private async clearActiveSessionState(): Promise<void> {
+        const currentData = (await this.loadData()) as PluginData | null;
+        if (!currentData?.activeSessionState) return;
+        const pluginData: PluginData = {
+            settings: this.settings,
+            resumeSessions: currentData?.resumeSessions || {},
+            activeSessionState: undefined
+        };
+        await this.saveData(pluginData);
+    }
+
+    /**
+     * Restore active session state from persistent storage, if present.
+     * Restores timer as running while the app was closed and opens mini view.
+     * Does not automatically open modal/HUD (treated as minimized by default).
+     */
+    private async restoreActiveSessionState(): Promise<boolean> {
+        const currentData = (await this.loadData()) as PluginData | null;
+        const persisted = currentData?.activeSessionState;
+        if (!persisted) return false;
+        if (!this.settings.enableTimeboxing) return false;
+
+        try {
+            const rootFile = this.app.vault.getAbstractFileByPath(persisted.rootFilePath);
+            if (!(rootFile instanceof TFile) || rootFile.extension !== 'canvas') {
+                throw new Error(`Root canvas file not found: ${persisted.rootFilePath}`);
+            }
+            const currentFile = this.app.vault.getAbstractFileByPath(persisted.currentFilePath);
+            if (!(currentFile instanceof TFile) || currentFile.extension !== 'canvas') {
+                throw new Error(`Current canvas file not found: ${persisted.currentFilePath}`);
+            }
+
+            const content = await this.app.vault.read(currentFile);
+            const canvasData: CanvasData = JSON.parse(content);
+            const currentNode = canvasData.nodes.find(n => n.id === persisted.currentNodeId);
+            if (!currentNode) {
+                throw new Error(`Node not found: ${persisted.currentNodeId}`);
+            }
+
+            const stack = await restoreStackFromResume(this.app, persisted.stack);
+
+            const history: CanvasNode[] = [];
+            for (const nodeId of persisted.historyNodeIds) {
+                const node = canvasData.nodes.find(n => n.id === nodeId);
+                if (node) history.push(node);
+            }
+
+            this.activeSession = {
+                rootCanvasFile: rootFile,
+                currentCanvasFile: currentFile,
+                currentCanvasData: canvasData,
+                currentNode,
+                state: { ...persisted.state },
+                stack,
+                history,
+                timerDurationMs: persisted.timerDurationMs,
+                timerStartTimeMs: persisted.timerStartTimeMs
+            };
+            this.activeSessionMode = persisted.mode;
+
+            // Restore running timer (wall-clock based)
+            this.sharedTimer.restoreFromPersisted(persisted.timerStartTimeMs, persisted.timerDurationMs);
+
+            // Update status bar and show mini view
+            this.updateStatusBar();
+            await this.ensureMiniViewOpen();
+            await this.updateAllUIs();
+
+            return true;
+        } catch (e) {
+            console.error('Canvas Player: failed to restore active session state', e);
+            new Notice('Canvas Player: Could not restore timer session. Clearing saved state.');
+            await this.clearActiveSessionState();
+            return false;
+        }
     }
 
     // Legacy methods for compatibility (redirect to new methods)
@@ -587,10 +717,14 @@ export class CanvasPlayerPlugin extends Plugin {
                 initialStack,
                 timerDurationMs
             );
+            this.activeSessionMode = 'modal';
             
             // Start shared timer if timeboxing is enabled
             if (this.settings.enableTimeboxing && timerDurationMs > 0) {
+                this.activeSession.timerStartTimeMs = Date.now();
                 this.sharedTimer.start(timerDurationMs);
+                // Persist state after timer starts
+                await this.saveActiveSessionState();
             }
             
             // Update status bar
@@ -623,10 +757,14 @@ export class CanvasPlayerPlugin extends Plugin {
                 initialStack,
                 timerDurationMs
             );
+            this.activeSessionMode = 'camera';
             
             // Start shared timer if timeboxing is enabled
             if (this.settings.enableTimeboxing && timerDurationMs > 0) {
+                this.activeSession.timerStartTimeMs = Date.now();
                 this.sharedTimer.start(timerDurationMs);
+                // Persist state after timer starts
+                await this.saveActiveSessionState();
             }
             
             // Update status bar
@@ -871,6 +1009,10 @@ export class CanvasPlayerPlugin extends Plugin {
         this.activeOverlay = null;
         this.cameraModeView = null;
         this.activeSession = null;
+        this.activeSessionMode = null;
+
+        // Clear persisted active session state
+        await this.clearActiveSessionState();
         
         // Update UI
         this.updateStatusBar();
@@ -1410,8 +1552,10 @@ export class CanvasPlayerPlugin extends Plugin {
     async restorePlayer() {
         if (!this.activeSession) return;
         
+        const mode = this.activeSessionMode ?? this.settings.mode;
+
         // Check if we're in modal mode or camera mode
-        if (this.activeModal || this.settings.mode === 'modal') {
+        if (mode === 'modal') {
             // Reopen modal
             const session = this.activeSession;
             const modal = new CanvasPlayerModal(
@@ -1425,9 +1569,18 @@ export class CanvasPlayerPlugin extends Plugin {
             );
             this.activeModal = modal;
             modal.open();
-        } else if (this.cameraModeView) {
-            // Restore camera mode
-            await this.restoreCameraMode();
+        } else {
+            // Camera mode restore
+            if (this.cameraModeView) {
+                await this.restoreCameraMode();
+            } else {
+                // Recreate a camera view and HUD (e.g. after restart)
+                const leaf = this.app.workspace.getLeaf(false) ?? this.app.workspace.getLeaf(true);
+                if (!leaf) return;
+                await leaf.openFile(this.activeSession.currentCanvasFile);
+                this.app.workspace.revealLeaf(leaf);
+                await this.startCameraMode(this.activeSession.currentCanvasData, this.activeSession.currentNode);
+            }
         }
         
         // Refresh mini view to hide Restore button
@@ -1488,15 +1641,18 @@ export class CanvasPlayerPlugin extends Plugin {
     isPlayerMinimized(): boolean {
         if (!this.activeSession) return false;
         
+        const mode = this.activeSessionMode ?? this.settings.mode;
+
         // Reader mode: minimized if modal is closed
-        if (this.settings.mode === 'modal') {
+        if (mode === 'modal') {
             return this.activeModal === null;
         }
         
-        // Camera mode: minimized if HUD exists but is hidden
-        if (this.cameraModeView) {
-            if (!this.activeHud) return false;
-            // Check if HUD is hidden (using offsetParent which is null for hidden elements)
+        // Camera mode: minimized if we don't currently have an active camera view,
+        // or if the HUD exists but is hidden.
+        if (mode === 'camera') {
+            if (!this.cameraModeView) return true;
+            if (!this.activeHud) return true;
             return this.activeHud.offsetParent === null;
         }
         
@@ -1584,7 +1740,11 @@ export class CanvasPlayerPlugin extends Plugin {
         // Clean up
         this.sharedTimer.abort();
         this.activeSession = null;
+        this.activeSessionMode = null;
         this.activeModal = null;
+
+        // Clear persisted active session state
+        await this.clearActiveSessionState();
         
         // Update UI
         this.updateStatusBar();
@@ -1768,6 +1928,9 @@ export class CanvasPlayerPlugin extends Plugin {
         this.sharedTimer.start(durationMs);
         
         this.updateStatusBar();
+
+        // Persist state after timer starts/restarts
+        await this.saveActiveSessionState();
     }
 
     /**
@@ -1978,7 +2141,7 @@ class CanvasPlayerModal extends Modal {
     private timerEl: HTMLElement | null = null;
     private timerUnsubscribe: (() => void) | null = null;
     private shouldActuallyClose: boolean = false; // Flag to track if we should actually close (Stop button) vs minimize
-    private isMinimizing: boolean = false; // Flag to prevent recursion when minimizePlayer calls close()
+    public isMinimizing: boolean = false; // Flag to prevent recursion when minimizePlayer calls close()
 
     constructor(plugin: CanvasPlayerPlugin, canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode, initialState?: GameState, initialStack?: StackFrame[], rootCanvasFile?: TFile) {
         super(plugin.app);
