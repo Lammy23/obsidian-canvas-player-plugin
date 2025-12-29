@@ -231,3 +231,31 @@ If your plugin does not need CSS, delete this file.
     background-color: var(--background-modifier-hover);
 }
 
+/* --- MIRROR MODE STATUS --- */
+.canvas-player-mini-status {
+    font-size: 0.85em;
+    padding: 4px 8px;
+    border-radius: 3px;
+    margin-top: 5px;
+    display: inline-block;
+}
+
+.canvas-player-mini-status-owned {
+    background-color: var(--background-modifier-success, rgba(0, 255, 0, 0.1));
+    color: var(--text-success, #4caf50);
+}
+
+.canvas-player-mini-status-mirror {
+    background-color: var(--background-modifier-border-hover, rgba(128, 128, 128, 0.1));
+    color: var(--text-muted);
+}
+
+.canvas-player-mini-mirror-message {
+    padding: 10px;
+    background-color: var(--background-secondary);
+    border-radius: 5px;
+    color: var(--text-muted);
+    font-style: italic;
+    text-align: center;
+}
+

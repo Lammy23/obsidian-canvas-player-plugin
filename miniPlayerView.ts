@@ -62,11 +62,27 @@ export class CanvasPlayerMiniView extends ItemView {
             emptyEl.textContent = 'No active canvas player session.';
             return;
         }
+        
+        // Check if this device owns the session
+        const isOwner = await this.plugin.isSessionOwner();
+        const sessionData = await this.plugin.getResumeSession(session.rootCanvasFile.path);
+        const writerDeviceId = sessionData?.writerDeviceId;
+        const shortDeviceId = writerDeviceId ? writerDeviceId.substring(0, 8) : 'unknown';
 
-        // Header with canvas name
+        // Header with canvas name and ownership status
         const header = this.contentContainer.createDiv({ cls: 'canvas-player-mini-header' });
         this.currentCanvasDisplay = header.createDiv({ cls: 'canvas-player-mini-canvas-name' });
         this.currentCanvasDisplay.textContent = session.currentCanvasFile.basename;
+        
+        // Ownership status indicator
+        const statusEl = header.createDiv({ cls: 'canvas-player-mini-status' });
+        if (isOwner) {
+            statusEl.textContent = 'Owned by this device';
+            statusEl.addClass('canvas-player-mini-status-owned');
+        } else {
+            statusEl.textContent = `Mirroring ${shortDeviceId}`;
+            statusEl.addClass('canvas-player-mini-status-mirror');
+        }
 
         // Current node label/text
         const nodeSection = this.contentContainer.createDiv({ cls: 'canvas-player-mini-node' });
@@ -80,21 +96,44 @@ export class CanvasPlayerMiniView extends ItemView {
             this.updateTimerDisplay(this.plugin.sharedTimer.getRemainingMs());
         }
 
-        // Back button (if history exists)
-        if (session.history.length > 0) {
+        // Back button (if history exists and owner)
+        if (session.history.length > 0 && isOwner) {
             new ButtonComponent(this.contentContainer)
                 .setButtonText('← Back')
                 .onClick(async () => {
                     await this.plugin.navigateBack();
                 });
+        } else if (session.history.length > 0 && !isOwner) {
+            // Show disabled back button in mirror mode
+            const backBtn = this.contentContainer.createEl('button', { 
+                text: '← Back',
+                cls: 'mod-disabled'
+            });
+            backBtn.disabled = true;
         }
 
-        // Choices
+        // Choices (only if owner)
         this.choicesContainer = this.contentContainer.createDiv({ cls: 'canvas-player-mini-choices' });
-        await this.renderChoices(session);
+        if (isOwner) {
+            await this.renderChoices(session);
+        } else {
+            // Show disabled message in mirror mode
+            const mirrorMsg = this.choicesContainer.createDiv({ cls: 'canvas-player-mini-mirror-message' });
+            mirrorMsg.textContent = 'Read-only mirror mode. Click "Take over" to control navigation.';
+        }
 
         // Action buttons
         const actionsSection = this.contentContainer.createDiv({ cls: 'canvas-player-mini-actions' });
+        
+        if (!isOwner) {
+            // Take over button when in mirror mode
+            new ButtonComponent(actionsSection)
+                .setButtonText('Take over')
+                .setCta()
+                .onClick(async () => {
+                    await this.plugin.takeOverSession();
+                });
+        }
         
         new ButtonComponent(actionsSection)
             .setButtonText('Restore')
@@ -103,6 +142,7 @@ export class CanvasPlayerMiniView extends ItemView {
                 await this.plugin.restorePlayer();
             });
 
+        // Stop is always allowed (even in mirror mode)
         new ButtonComponent(actionsSection)
             .setButtonText('Stop')
             .onClick(async () => {
@@ -141,6 +181,12 @@ export class CanvasPlayerMiniView extends ItemView {
     private async renderChoices(session: ActiveSession) {
         if (!this.choicesContainer) return;
         this.choicesContainer.empty();
+        
+        // Check ownership - choices should only render if owner
+        const isOwner = await this.plugin.isSessionOwner();
+        if (!isOwner) {
+            return; // Should not happen, but safety check
+        }
 
         const { currentCanvasData, currentNode, state } = session;
         const rawChoices = currentCanvasData.edges.filter((edge: any) => edge.fromNode === currentNode.id);
@@ -159,7 +205,7 @@ export class CanvasPlayerMiniView extends ItemView {
 
         if (missingVars.size > 0) {
             const promptSection = this.choicesContainer.createDiv({ cls: 'canvas-player-mini-prompt' });
-            promptSection.createEl('div', { 
+            promptSection.createDiv({ 
                 text: 'Set values for missing variables:',
                 cls: 'canvas-player-mini-prompt-header'
             });

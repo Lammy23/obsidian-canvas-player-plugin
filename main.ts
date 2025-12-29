@@ -65,6 +65,9 @@ export class CanvasPlayerPlugin extends Plugin {
 
         this.app.workspace.onLayoutReady(() => {
             this.refreshCanvasViewActions();
+            
+            // Auto-hydrate active session if one exists (for mirror mode)
+            void this.autoHydrateActiveSession();
         });
 
         this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
@@ -344,6 +347,88 @@ export class CanvasPlayerPlugin extends Plugin {
         if ('complexityWeights' in this.settings) {
             delete (this.settings as any).complexityWeights;
         }
+        
+        // Ensure deviceId exists (stable per-installation)
+        const currentData = (await this.loadData()) as PluginData | null;
+        if (!currentData?.deviceId) {
+            // Generate a stable device ID (UUID v4)
+            const deviceId = this.generateDeviceId();
+            const updatedData: PluginData = {
+                ...currentData,
+                settings: this.settings,
+                resumeSessions: currentData?.resumeSessions || {},
+                deviceId
+            };
+            await this.saveData(updatedData);
+        }
+    }
+    
+    /**
+     * Generate a stable device ID for this installation.
+     */
+    private generateDeviceId(): string {
+        // Generate UUID v4
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+    
+    /**
+     * Get the device ID for this installation.
+     */
+    private async getDeviceId(): Promise<string> {
+        const data = (await this.loadData()) as PluginData | null;
+        if (data?.deviceId) {
+            return data.deviceId;
+        }
+        // Should not happen if loadPluginData was called, but fallback
+        const deviceId = this.generateDeviceId();
+        const updatedData: PluginData = {
+            ...data,
+            settings: this.settings,
+            resumeSessions: data?.resumeSessions || {},
+            deviceId
+        };
+        await this.saveData(updatedData);
+        return deviceId;
+    }
+    
+    /**
+     * Generate a unique session ID.
+     */
+    private generateSessionId(): string {
+        return 'session-' + Date.now() + '-' + Math.random().toString(36).substring(2, 11);
+    }
+    
+    /**
+     * Set the global active session key.
+     */
+    private async setActiveSessionKey(rootFilePath: string): Promise<void> {
+        const currentData = (await this.loadData()) as PluginData | null;
+        const pluginData: PluginData = {
+            settings: this.settings,
+            resumeSessions: currentData?.resumeSessions || {},
+            activeSessionKey: rootFilePath,
+            deviceId: currentData?.deviceId || await this.getDeviceId()
+        };
+        await this.saveData(pluginData);
+    }
+    
+    /**
+     * Clear the global active session key.
+     */
+    private async clearActiveSessionKey(): Promise<void> {
+        const currentData = (await this.loadData()) as PluginData | null;
+        const pluginData: PluginData = {
+            settings: this.settings,
+            resumeSessions: currentData?.resumeSessions || {},
+            deviceId: currentData?.deviceId || await this.getDeviceId()
+        };
+        // Explicitly set to undefined to clear it
+        pluginData.activeSessionKey = undefined;
+        await this.saveData(pluginData);
     }
 
     async savePluginData(): Promise<void> {
@@ -362,7 +447,9 @@ export class CanvasPlayerPlugin extends Plugin {
         const currentData = (await this.loadData()) as PluginData | null;
         const pluginData: PluginData = {
             settings: this.settings,
-            resumeSessions: { ...(currentData?.resumeSessions || {}), [rootFilePath]: session }
+            resumeSessions: { ...(currentData?.resumeSessions || {}), [rootFilePath]: session },
+            activeSessionKey: currentData?.activeSessionKey, // Preserve existing
+            deviceId: currentData?.deviceId || await this.getDeviceId()
         };
         await this.saveData(pluginData);
     }
@@ -391,6 +478,75 @@ export class CanvasPlayerPlugin extends Plugin {
 
     async saveSettings() {
         await this.savePluginData();
+    }
+
+    // Debounced autosave for active session snapshot (cross-device sync)
+    private saveSnapshotTimeoutId: number | null = null;
+    private readonly SNAPSHOT_DEBOUNCE_MS = 300;
+
+    /**
+     * Save a snapshot of the current active session for cross-device resume.
+     * Debounced to avoid excessive writes during rapid navigation.
+     */
+    private saveActiveSessionSnapshot(): void {
+        if (!this.activeSession) return;
+
+        // Clear any pending save
+        if (this.saveSnapshotTimeoutId !== null) {
+            window.clearTimeout(this.saveSnapshotTimeoutId);
+            this.saveSnapshotTimeoutId = null;
+        }
+
+        // Debounce the save
+        this.saveSnapshotTimeoutId = window.setTimeout(async () => {
+            this.saveSnapshotTimeoutId = null;
+
+            const session = this.activeSession;
+            if (!session) return;
+
+            await this.saveActiveSessionSnapshotImmediate();
+        }, this.SNAPSHOT_DEBOUNCE_MS);
+    }
+    
+    /**
+     * Immediately save snapshot without debounce (for stop, takeover, etc.).
+     */
+    private async saveActiveSessionSnapshotImmediate(): Promise<void> {
+        const session = this.activeSession;
+        if (!session) return;
+
+        const deviceId = await this.getDeviceId();
+        
+        // Get existing session to preserve sessionId if it exists
+        const existingSession = await this.getResumeSession(session.rootCanvasFile.path);
+        const sessionId = existingSession?.sessionId || this.generateSessionId();
+
+        // Build resume session snapshot
+        const resumeSession: ResumeSession = {
+            rootFilePath: session.rootCanvasFile.path,
+            currentFilePath: session.currentCanvasFile.path,
+            currentNodeId: session.currentNode.id,
+            currentSessionState: { ...session.state },
+            stack: session.stack.map(frame => ({
+                filePath: frame.file.path,
+                currentNodeId: frame.currentNode.id,
+                state: { ...frame.state }
+            })),
+            sessionId,
+            lastUpdatedMs: Date.now(),
+            writerDeviceId: deviceId
+        };
+
+        // Include timer metadata if timeboxing is enabled and timer is running
+        if (this.settings.enableTimeboxing && session.timerStartTimeMs !== null) {
+            resumeSession.timerStartTimeMs = session.timerStartTimeMs;
+            resumeSession.timerDurationMs = session.timerDurationMs;
+        }
+
+        await this.saveResumeSession(session.rootCanvasFile.path, resumeSession);
+        
+        // Update global active session pointer
+        await this.setActiveSessionKey(session.rootCanvasFile.path);
     }
 
     async playActiveCanvas() {
@@ -460,8 +616,13 @@ export class CanvasPlayerPlugin extends Plugin {
                 throw new Error(`Node not found: ${session.currentNodeId}`);
             }
 
+            // Extract timer metadata if available
+            const timerMetadata = (session.timerStartTimeMs !== undefined && session.timerDurationMs !== undefined) 
+                ? { timerStartTimeMs: session.timerStartTimeMs, timerDurationMs: session.timerDurationMs }
+                : undefined;
+            
             // Start playback at saved node with restored state and stack
-            await this.playCanvasFromNode(currentFile, canvasData, currentNode, session.currentSessionState, this.stack);
+            await this.playCanvasFromNode(currentFile, canvasData, currentNode, session.currentSessionState, this.stack, timerMetadata);
         } catch (error) {
             console.error('Canvas Player: failed to resume session', error);
             new Notice(`Failed to resume session: ${error instanceof Error ? error.message : 'Unknown error'}. Starting from the beginning.`);
@@ -548,7 +709,7 @@ export class CanvasPlayerPlugin extends Plugin {
         }
     }
 
-    async playCanvasFromNode(canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode, initialState?: GameState, initialStack?: StackFrame[]) {
+    async playCanvasFromNode(canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode, initialState?: GameState, initialStack?: StackFrame[], resumeTimerMetadata?: { timerStartTimeMs: number; timerDurationMs: number }) {
         // If rootCanvasFile is not set, this is a new session (not a resume)
         const isNewSession = !this.rootCanvasFile;
         if (isNewSession) {
@@ -559,11 +720,23 @@ export class CanvasPlayerPlugin extends Plugin {
             // Create active session for modal mode
             const rootFile = this.rootCanvasFile ?? canvasFile;
             let timerDurationMs = 0;
+            let timerStartTimeMs: number | null = null;
             
             if (this.settings.enableTimeboxing) {
-                const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
-                const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
-                timerDurationMs = timingData ? timingData.avgMs : defaultMs;
+                if (resumeTimerMetadata) {
+                    // Resume with persisted timer: compute remaining time
+                    const elapsedMs = Date.now() - resumeTimerMetadata.timerStartTimeMs;
+                    const remainingMs = Math.max(0, resumeTimerMetadata.timerDurationMs - elapsedMs);
+                    timerDurationMs = remainingMs;
+                    // Keep original start time for accurate tracking
+                    timerStartTimeMs = resumeTimerMetadata.timerStartTimeMs;
+                } else {
+                    // New session or no timer metadata: use timing averages/default
+                    const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
+                    const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
+                    timerDurationMs = timingData ? timingData.avgMs : defaultMs;
+                    timerStartTimeMs = Date.now();
+                }
             }
             
             this.activeSession = createActiveSession(
@@ -576,10 +749,19 @@ export class CanvasPlayerPlugin extends Plugin {
                 timerDurationMs
             );
             
+            // Set timer start time (either from resume or current time)
+            if (timerStartTimeMs !== null) {
+                this.activeSession.timerStartTimeMs = timerStartTimeMs;
+            }
+            
             // Start shared timer if timeboxing is enabled
             if (this.settings.enableTimeboxing && timerDurationMs > 0) {
                 this.sharedTimer.start(timerDurationMs);
             }
+            
+            // Set global active session key and save initial snapshot
+            await this.setActiveSessionKey(rootFile.path);
+            await this.saveActiveSessionSnapshotImmediate();
             
             // Update status bar
             this.updateStatusBar();
@@ -1119,6 +1301,9 @@ export class CanvasPlayerPlugin extends Plugin {
     async minimizePlayer() {
         if (!this.activeSession) return;
         
+        // Save snapshot before minimizing
+        this.saveActiveSessionSnapshot();
+        
         // Close modal (but keep session active)
         if (this.activeModal) {
             this.activeModal.close();
@@ -1134,6 +1319,9 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async restorePlayer() {
         if (!this.activeSession) return;
+        
+        // Save snapshot before restoring
+        this.saveActiveSessionSnapshot();
         
         // Reopen modal
         const session = this.activeSession;
@@ -1183,18 +1371,36 @@ export class CanvasPlayerPlugin extends Plugin {
     async stopActiveSession() {
         if (!this.activeSession) return;
         
-        // Save resume session before stopping
-        await this.saveResumeSession(this.activeSession.rootCanvasFile.path, {
-            rootFilePath: this.activeSession.rootCanvasFile.path,
-            currentFilePath: this.activeSession.currentCanvasFile.path,
-            currentNodeId: this.activeSession.currentNode.id,
-            currentSessionState: { ...this.activeSession.state },
-            stack: this.activeSession.stack.map(frame => ({
+        // Clear any pending debounced save and do immediate save
+        if (this.saveSnapshotTimeoutId !== null) {
+            window.clearTimeout(this.saveSnapshotTimeoutId);
+            this.saveSnapshotTimeoutId = null;
+        }
+        
+        // Save resume session immediately before stopping
+        const session = this.activeSession;
+        const resumeSession: ResumeSession = {
+            rootFilePath: session.rootCanvasFile.path,
+            currentFilePath: session.currentCanvasFile.path,
+            currentNodeId: session.currentNode.id,
+            currentSessionState: { ...session.state },
+            stack: session.stack.map(frame => ({
                 filePath: frame.file.path,
                 currentNodeId: frame.currentNode.id,
                 state: { ...frame.state }
             }))
-        });
+        };
+        
+        // Include timer metadata if available
+        if (this.settings.enableTimeboxing && session.timerStartTimeMs !== null) {
+            resumeSession.timerStartTimeMs = session.timerStartTimeMs;
+            resumeSession.timerDurationMs = session.timerDurationMs;
+        }
+        
+        await this.saveResumeSession(session.rootCanvasFile.path, resumeSession);
+        
+        // Clear global active session key
+        await this.clearActiveSessionKey();
         
         // Finish and save timer for current node
         if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
@@ -1237,6 +1443,9 @@ export class CanvasPlayerPlugin extends Plugin {
             await this.startTimerForActiveSession();
         }
         
+        // Save snapshot after navigation
+        this.saveActiveSessionSnapshot();
+        
         // Update UI
         await this.updateAllUIs();
     }
@@ -1246,6 +1455,12 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async navigateToNode(parsedChoice: any, nextNode: CanvasNode) {
         if (!this.activeSession) return;
+        
+        // Check if we own the session
+        if (!(await this.isSessionOwner())) {
+            new Notice('Session is being controlled by another device. Click "Take over" to control navigation.');
+            return;
+        }
         
         // Finish timer for current node
         if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
@@ -1272,6 +1487,9 @@ export class CanvasPlayerPlugin extends Plugin {
             await this.startTimerForActiveSession();
         }
         
+        // Save snapshot after navigation
+        this.saveActiveSessionSnapshot();
+        
         // Update UI
         await this.updateAllUIs();
     }
@@ -1282,6 +1500,12 @@ export class CanvasPlayerPlugin extends Plugin {
     async navigateReturnToParent() {
         if (!this.activeSession || this.activeSession.stack.length === 0) {
             await this.stopActiveSession();
+            return;
+        }
+        
+        // Check if we own the session
+        if (!(await this.isSessionOwner())) {
+            new Notice('Session is being controlled by another device. Click "Take over" to control navigation.');
             return;
         }
         
@@ -1307,6 +1531,9 @@ export class CanvasPlayerPlugin extends Plugin {
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
         }
+        
+        // Save snapshot after navigation
+        this.saveActiveSessionSnapshot();
         
         // Update UI
         await this.updateAllUIs();
@@ -1361,6 +1588,9 @@ export class CanvasPlayerPlugin extends Plugin {
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
         }
+        
+        // Save snapshot after diving into nested canvas
+        this.saveActiveSessionSnapshot();
         
         // Update UI
         await this.updateAllUIs();
@@ -1450,6 +1680,105 @@ export class CanvasPlayerPlugin extends Plugin {
         
         // Update status bar
         this.updateStatusBar();
+    }
+    
+    /**
+     * Auto-hydrate active session on app open (for mirror mode across devices).
+     */
+    private async autoHydrateActiveSession() {
+        const currentData = (await this.loadData()) as PluginData | null;
+        if (!currentData?.activeSessionKey) {
+            return; // No active session to hydrate
+        }
+        
+        const session = await this.getResumeSession(currentData.activeSessionKey);
+        if (!session) {
+            // Session key exists but session is missing - clear it
+            await this.clearActiveSessionKey();
+            return;
+        }
+        
+        // Validate session
+        const validationError = await validateResumeSession(this.app, session);
+        if (validationError) {
+            // Invalid session - clear it
+            await this.clearResumeSession(currentData.activeSessionKey);
+            await this.clearActiveSessionKey();
+            return;
+        }
+        
+        try {
+            // Set root tracking
+            this.rootCanvasFile = this.app.vault.getAbstractFileByPath(session.rootFilePath) as TFile;
+            if (!this.rootCanvasFile) {
+                return;
+            }
+            
+            // Restore stack
+            this.stack = await restoreStackFromResume(this.app, session.stack);
+            
+            // Load current canvas and node
+            const currentFile = this.app.vault.getAbstractFileByPath(session.currentFilePath);
+            if (!(currentFile instanceof TFile)) {
+                return;
+            }
+            
+            const content = await this.app.vault.read(currentFile);
+            const canvasData: CanvasData = JSON.parse(content);
+            const currentNode = canvasData.nodes.find(n => n.id === session.currentNodeId);
+            if (!currentNode) {
+                return;
+            }
+            
+            // Only auto-hydrate in modal mode (camera mode requires canvas view)
+            if (this.settings.mode === 'modal') {
+                // Extract timer metadata if available
+                const timerMetadata = (session.timerStartTimeMs !== undefined && session.timerDurationMs !== undefined) 
+                    ? { timerStartTimeMs: session.timerStartTimeMs, timerDurationMs: session.timerDurationMs }
+                    : undefined;
+                
+                // Hydrate active session
+                await this.playCanvasFromNode(currentFile, canvasData, currentNode, session.currentSessionState, this.stack, timerMetadata);
+                
+                // Ensure mini view is open to show mirror state
+                await this.ensureMiniViewOpen();
+            }
+        } catch (error) {
+            console.error('Canvas Player: failed to auto-hydrate active session', error);
+            // Clear invalid session
+            await this.clearResumeSession(currentData.activeSessionKey);
+            await this.clearActiveSessionKey();
+        }
+    }
+    
+    /**
+     * Check if the current device owns the active session.
+     */
+    async isSessionOwner(): Promise<boolean> {
+        if (!this.activeSession) return false;
+        
+        const session = await this.getResumeSession(this.activeSession.rootCanvasFile.path);
+        if (!session) return false;
+        
+        const deviceId = await this.getDeviceId();
+        const LEASE_TIMEOUT_MS = 60_000; // 60 seconds
+        
+        return session.writerDeviceId === deviceId && 
+               session.lastUpdatedMs !== undefined &&
+               (Date.now() - session.lastUpdatedMs) <= LEASE_TIMEOUT_MS;
+    }
+    
+    /**
+     * Take over the active session (gain write control).
+     */
+    async takeOverSession(): Promise<void> {
+        if (!this.activeSession) return;
+        
+        // Save snapshot immediately with this device as owner
+        await this.saveActiveSessionSnapshotImmediate();
+        
+        // Refresh UI to show we're now the owner
+        await this.updateAllUIs();
     }
 }
 
@@ -1668,12 +1997,18 @@ class CanvasPlayerModal extends Modal {
         const controls = container.createDiv({ cls: 'canvas-player-controls' });
         const textContainer = container.createDiv({ cls: 'canvas-player-text' });
         
-        new ButtonComponent(controls)
+        // Check if we own the session
+        const isOwnerModal = await this.plugin.isSessionOwner();
+        
+        const backBtn = new ButtonComponent(controls)
             .setButtonText('Back')
-            .setDisabled(session.history.length === 0)
-            .onClick(async () => {
+            .setDisabled(session.history.length === 0 || !isOwnerModal);
+        
+        if (isOwnerModal) {
+            backBtn.onClick(async () => {
                 await this.plugin.navigateBack();
             });
+        }
 
         new ButtonComponent(controls)
             .setButtonText('Edit')
@@ -1743,6 +2078,9 @@ class CanvasPlayerModal extends Modal {
 
         const buttonContainer = container.createDiv({ cls: 'canvas-player-choices' });
 
+        // Check if we own the session
+        const isOwnerChoices = await this.plugin.isSessionOwner();
+
         if (missingVars.size > 0) {
             const promptContainer = container.createDiv({ cls: 'canvas-player-prompt' });
             promptContainer.createEl('h3', { text: 'Set values for missing variables:' });
@@ -1750,20 +2088,34 @@ class CanvasPlayerModal extends Modal {
             missingVars.forEach(variable => {
                 if (session.state[variable] === undefined) session.state[variable] = false;
 
-                new Setting(promptContainer)
+                const setting = new Setting(promptContainer)
                     .setName(variable)
-                    .addToggle(toggle => toggle
-                        .setValue(session.state[variable])
-                        .onChange(val => session.state[variable] = val)
-                    );
+                    .addToggle(toggle => {
+                        toggle.setValue(session.state[variable]);
+                        toggle.setDisabled(!isOwnerChoices);
+                        toggle.onChange(async (val) => {
+                            // Check ownership before allowing state change
+                            if (!(await this.plugin.isSessionOwner())) {
+                                new Notice('Session is being controlled by another device. Click "Take over" to control navigation.');
+                                toggle.setValue(!val); // Revert
+                                return;
+                            }
+                            session.state[variable] = val;
+                        });
+                    });
             });
 
-            new ButtonComponent(promptContainer)
+            const continueBtn = new ButtonComponent(promptContainer)
                 .setButtonText("Continue")
-                .setCta()
-                .onClick(() => {
+                .setCta();
+            
+            if (!isOwnerChoices) {
+                continueBtn.setDisabled(true);
+            } else {
+                continueBtn.onClick(() => {
                     this.renderScene();
                 });
+            }
             return; // Stop rendering regular choices
         }
 

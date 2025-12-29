@@ -17,6 +17,16 @@ export interface ResumeSession {
     currentSessionState: GameState;
     /** Stack of nested canvas frames (if any) */
     stack: ResumeStackFrame[];
+    /** Timer start timestamp in milliseconds (for cross-device resume) */
+    timerStartTimeMs?: number;
+    /** Timer duration in milliseconds (for cross-device resume) */
+    timerDurationMs?: number;
+    /** Unique session identifier (for multi-device lease tracking) */
+    sessionId?: string;
+    /** Timestamp when this snapshot was last written (epoch ms) */
+    lastUpdatedMs?: number;
+    /** Device ID that last wrote this snapshot */
+    writerDeviceId?: string;
 }
 
 /**
@@ -37,6 +47,10 @@ export interface ResumeStackFrame {
 export interface PluginData {
     settings?: any; // CanvasPlayerSettings - using any to avoid circular import
     resumeSessions?: Record<string, ResumeSession>; // Keyed by rootFilePath
+    /** Root canvas path of the globally-active session (for auto-hydration on app open) */
+    activeSessionKey?: string;
+    /** Stable device identifier for this installation */
+    deviceId?: string;
 }
 
 /**
