@@ -24,7 +24,7 @@ export function extractNodeInfo(node: any): { id: string; type: string } | null 
  * Blocks conversion if the card has any edges connected to it.
  */
 export async function convertCardToGroup(
-    app: App,
+    app: any,
     canvasFile: TFile,
     nodeId: string,
     data: CanvasData
@@ -84,7 +84,7 @@ export async function convertCardToGroup(
  * Converts a group node to a text card.
  */
 export async function convertGroupToCard(
-    app: App,
+    app: any,
     canvasFile: TFile,
     nodeId: string,
     data: CanvasData
@@ -119,10 +119,10 @@ export async function convertGroupToCard(
  * Helper to load canvas data and perform a transformation.
  */
 export async function transformNode(
-    app: App,
+    app: any,
     nodeId: string,
     nodeType: string,
-    transformFn: (app: App, file: TFile, nodeId: string, data: CanvasData) => Promise<boolean>
+    transformFn: (app: any, file: TFile, nodeId: string, data: CanvasData) => Promise<boolean>
 ): Promise<void> {
     const activeFile = app.workspace.getActiveFile();
     if (!activeFile || activeFile.extension !== 'canvas') {

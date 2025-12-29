@@ -1,4 +1,4 @@
-import { App, TFile } from 'obsidian';
+import { App, TFile, Plugin } from 'obsidian';
 import type { CanvasNode, CanvasData, StackFrame } from './types';
 import type { GameState } from './logic';
 
@@ -44,7 +44,7 @@ export interface PluginData {
  * Returns null if valid, or an error message if invalid.
  */
 export async function validateResumeSession(
-    app: App,
+    app: any,
     session: ResumeSession
 ): Promise<string | null> {
     // Check if root file exists
@@ -96,7 +96,7 @@ export async function validateResumeSession(
  * Restore StackFrame[] from ResumeStackFrame[] by loading actual files and nodes.
  */
 export async function restoreStackFromResume(
-    app: App,
+    app: any,
     resumeStack: ResumeStackFrame[]
 ): Promise<StackFrame[]> {
     const stack: StackFrame[] = [];

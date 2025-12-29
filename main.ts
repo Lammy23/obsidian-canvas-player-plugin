@@ -1164,7 +1164,7 @@ export class CanvasPlayerPlugin extends Plugin {
             // Fallback: Try to find by querying all nodes and matching ID
             if (attempt === 0 || attempt === 2) {
                 const allNodes = view.contentEl.querySelectorAll('.canvas-node');
-                for (const nodeEl of allNodes) {
+                for (const nodeEl of Array.from(allNodes)) {
                     const el = nodeEl as HTMLElement;
                     // Check various ways the ID might be stored in DOM
                     const nodeId = el.getAttribute('data-id') || 
@@ -1627,7 +1627,7 @@ class ConfirmResetTimeboxingModal extends Modal {
     plugin: CanvasPlayerPlugin;
     canvasFile: TFile;
 
-    constructor(app: App, plugin: CanvasPlayerPlugin, canvasFile: TFile) {
+    constructor(app: CanvasPlayerPlugin['app'], plugin: CanvasPlayerPlugin, canvasFile: TFile) {
         super(app);
         this.plugin = plugin;
         this.canvasFile = canvasFile;
@@ -1695,7 +1695,7 @@ class ConfirmResetTimeboxingModal extends Modal {
 class CanvasPlayerSettingTab extends PluginSettingTab {
     plugin: CanvasPlayerPlugin;
 
-    constructor(app: App, plugin: CanvasPlayerPlugin) {
+    constructor(app: CanvasPlayerPlugin['app'], plugin: CanvasPlayerPlugin) {
         super(app, plugin);
         this.plugin = plugin;
     }

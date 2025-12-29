@@ -9,7 +9,7 @@ const TIMING_COMMENT_REGEX = /<!--\s*canvas-player:timing\s*(\{[^}]+\})\s*-->/;
  * Checks text node comments, markdown file comments, or node JSON property.
  */
 export async function loadTimingForNode(
-    app: App,
+    app: any,
     canvasFile: TFile,
     node: CanvasNode,
     canvasData: CanvasData
@@ -51,7 +51,7 @@ export async function loadTimingForNode(
  * Returns true if the canvas file needs to be saved.
  */
 export async function saveTimingForNode(
-    app: App,
+    app: any,
     canvasFile: TFile,
     node: CanvasNode,
     canvasData: CanvasData,

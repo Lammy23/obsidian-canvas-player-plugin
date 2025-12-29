@@ -32,7 +32,7 @@ export function stripTimingComment(text: string): { text: string; changed: boole
  * Returns whether the canvas was changed and which markdown files were modified.
  */
 export async function resetTimeboxingForCanvasFile(
-    app: App,
+    app: any,
     canvasFile: TFile
 ): Promise<ResetResult> {
     const result: ResetResult = {
@@ -104,7 +104,7 @@ export async function resetTimeboxingForCanvasFile(
  * Does not affect nested canvas files - those must be reset manually.
  */
 export async function resetTimeboxingRecursive(
-    app: App,
+    app: any,
     canvasFile: TFile
 ): Promise<{ canvasCount: number; markdownFileCount: number }> {
     // Only reset the current canvas, not nested canvases
