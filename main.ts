@@ -663,11 +663,10 @@ export class CanvasPlayerPlugin extends Plugin {
         if (this.activeHud) this.activeHud.remove();
         if (this.activeOverlay) this.activeOverlay.remove();
 
-        // 1. Create the Blur Overlay
-        const overlayEl = view.contentEl.createDiv({ cls: 'canvas-player-blur-overlay' });
-        this.activeOverlay = overlayEl;
+        // Note: Overlay is no longer used for blur (we use CSS classes instead)
+        // Keeping activeOverlay variable for potential future use, but not creating it here
 
-        // 2. Create HUD
+        // Create HUD
         const hudEl = view.contentEl.createDiv({ cls: 'canvas-player-hud' });
         this.activeHud = hudEl;
 
@@ -797,15 +796,18 @@ export class CanvasPlayerPlugin extends Plugin {
              this.cameraTimer = null;
          }
          
-         this.activeHud?.remove();
-         this.activeOverlay?.remove();
-         this.activeHud = null;
-         this.activeOverlay = null;
-         this.stack = []; // Clear stack on stop
-         this.currentCanvasFile = null;
-         this.currentCanvasData = null;
-         this.currentNodeForTimer = null;
-         this.rootCanvasFile = null;
+        // Remove spotlight from all views
+        this.removeSpotlight();
+        
+        this.activeHud?.remove();
+        this.activeOverlay?.remove();
+        this.activeHud = null;
+        this.activeOverlay = null;
+        this.stack = []; // Clear stack on stop
+        this.currentCanvasFile = null;
+        this.currentCanvasData = null;
+        this.currentNodeForTimer = null;
+        this.rootCanvasFile = null;
     }
 
     async renderChoicesInHud(view: ItemView, data: CanvasData, currentNode: CanvasNode, container: HTMLElement) {
@@ -909,7 +911,7 @@ export class CanvasPlayerPlugin extends Plugin {
                             }
 
                             // 1. Remove spotlight (clear view for movement)
-                            this.removeSpotlight();
+                            this.removeSpotlight(view);
                             
                             // 2. Move Camera
                             this.zoomToNode(view, nextNode);
@@ -1024,55 +1026,61 @@ export class CanvasPlayerPlugin extends Plugin {
         }, 400);
     }
 
-    removeSpotlight() {
-        if (this.activeOverlay) {
-            // Reset to full blur or hide it? Hiding it looks smoother for movement.
-            this.activeOverlay.style.opacity = '0';
-            this.activeOverlay.style.clipPath = 'none';
+    removeSpotlight(view?: ItemView) {
+        // Remove is-focused class from all nodes
+        if (view) {
+            const allFocusedNodes = view.contentEl.querySelectorAll('.canvas-node.is-focused');
+            allFocusedNodes.forEach(node => node.classList.remove('is-focused'));
+            
+            // Find canvas wrapper and remove focus mode attribute
+            const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
+                                 view.contentEl.querySelector('.canvas')?.parentElement;
+            if (canvasWrapper) {
+                canvasWrapper.removeAttribute('data-focus-mode-enabled');
+            }
+        } else {
+            // Fallback: remove from all canvas views if view not provided
+            this.app.workspace.iterateAllLeaves((leaf) => {
+                if (leaf.view.getViewType() === 'canvas') {
+                    const view = leaf.view as ItemView;
+                    const allFocusedNodes = view.contentEl.querySelectorAll('.canvas-node.is-focused');
+                    allFocusedNodes.forEach(node => node.classList.remove('is-focused'));
+                    
+                    const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
+                                         view.contentEl.querySelector('.canvas')?.parentElement;
+                    if (canvasWrapper) {
+                        canvasWrapper.removeAttribute('data-focus-mode-enabled');
+                    }
+                }
+            });
         }
     }
 
     applySpotlight(view: ItemView, node: CanvasNode) {
-        if (!this.activeOverlay) return;
+        // First, remove focus from any previously focused node
+        this.removeSpotlight(view);
 
-        // Find the DOM element to get its screen position
+        // Find the canvas wrapper element
+        // Try .canvas-wrapper first, then fall back to .canvas parent
+        const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
+                             view.contentEl.querySelector('.canvas')?.parentElement;
+        
+        if (!canvasWrapper) {
+            console.warn('Canvas Player: Could not find canvas wrapper element');
+            return;
+        }
+
+        // Enable focus mode on the canvas wrapper
+        canvasWrapper.setAttribute('data-focus-mode-enabled', 'true');
+
+        // Find the current node DOM element
         const targetEl = view.contentEl.querySelector(`.canvas-node[data-id="${node.id}"]`);
         
         if (targetEl) {
-            const rect = targetEl.getBoundingClientRect();
-            
-            // We need coordinates relative to the overlay (which is fixed to viewport/contentEl)
-            // Since overlay is 100% width/height of contentEl, we can usually use rect directly 
-            // if we account for the view's offset.
-            
-            // However, getBoundingClientRect is viewport-relative. 
-            // The overlay is `position: absolute` inside `contentEl`.
-            // We need to adjust for the contentEl's position on screen.
-            const containerRect = view.contentEl.getBoundingClientRect();
-            
-            const top = rect.top - containerRect.top;
-            const left = rect.left - containerRect.left;
-            const right = left + rect.width;
-            const bottom = top + rect.height;
-
-            // Create the "Hole" using clip-path polygon
-            // This draws a box around the screen, then cuts inward to trace the node
-            // Note: px values must be appended
-            const path = `polygon(
-                0% 0%, 
-                0% 100%, 
-                100% 100%, 
-                100% 0%, 
-                0% 0%, 
-                ${left}px ${top}px, 
-                ${right}px ${top}px, 
-                ${right}px ${bottom}px, 
-                ${left}px ${bottom}px, 
-                ${left}px ${top}px
-            )`;
-
-            this.activeOverlay.style.clipPath = path;
-            this.activeOverlay.style.opacity = '1';
+            // Add is-focused class to the current node
+            targetEl.classList.add('is-focused');
+        } else {
+            console.warn(`Canvas Player: Could not find node element with id ${node.id}`);
         }
     }
 
