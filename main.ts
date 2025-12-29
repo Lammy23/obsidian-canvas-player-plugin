@@ -986,10 +986,8 @@ export class CanvasPlayerPlugin extends Plugin {
              await this.saveResumeSession(this.activeSession.rootCanvasFile.path, session);
          }
 
-         // Finish and save timer for current node
-         if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
-             await this.finishTimerForActiveSession();
-         }
+         // Stopping should NOT affect node averages
+         this.abortTimerForActiveSession();
          
          // Clean up timer subscription
          if (this.cameraModeTimerUnsubscribe) {
@@ -1718,10 +1716,8 @@ export class CanvasPlayerPlugin extends Plugin {
             }))
         });
         
-        // Finish and save timer for current node
-        if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
-            await this.finishTimerForActiveSession();
-        }
+        // Stopping should NOT affect node averages
+        this.abortTimerForActiveSession();
         
         // Clean up camera mode if active
         if (this.cameraModeView) {
@@ -1766,10 +1762,8 @@ export class CanvasPlayerPlugin extends Plugin {
         const previousNode = this.activeSession.history.pop();
         if (!previousNode) return;
         
-        // Finish timer for current node
-        if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
-            await this.finishTimerForActiveSession();
-        }
+        // Going Back should NOT affect node averages
+        this.abortTimerForActiveSession();
         
         // Update session
         this.activeSession.currentNode = previousNode;
@@ -1975,6 +1969,16 @@ export class CanvasPlayerPlugin extends Plugin {
             const content = JSON.stringify(this.activeSession.currentCanvasData, null, 2);
             await this.app.vault.modify(this.activeSession.currentCanvasFile, content);
         }
+    }
+
+    /**
+     * Abort the current node timer WITHOUT updating averages.
+     * Used for actions like Stop or Back navigation where we don't want to count timing.
+     */
+    private abortTimerForActiveSession(): void {
+        if (!this.settings.enableTimeboxing) return;
+        if (!this.sharedTimer.isRunning()) return;
+        this.sharedTimer.abort();
     }
 
     /**
