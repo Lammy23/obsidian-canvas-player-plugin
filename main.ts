@@ -596,7 +596,10 @@ export class CanvasPlayerPlugin extends Plugin {
             // Update status bar
             this.updateStatusBar();
             
-            // Ensure mini view is available (will be opened on minimize)
+            // Auto-open mini view
+            await this.ensureMiniViewOpen();
+            
+            // Open modal
             const modal = new CanvasPlayerModal(this, canvasFile, canvasData, startNode, initialState, initialStack, rootFile);
             this.activeModal = modal;
             modal.open();
@@ -628,6 +631,9 @@ export class CanvasPlayerPlugin extends Plugin {
             
             // Update status bar
             this.updateStatusBar();
+            
+            // Auto-open mini view
+            await this.ensureMiniViewOpen();
             
             await this.startCameraMode(canvasData, startNode);
         }
@@ -868,11 +874,9 @@ export class CanvasPlayerPlugin extends Plugin {
         
         // Update UI
         this.updateStatusBar();
-        const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
-        miniLeaves.forEach(leaf => {
-            const miniView = leaf.view as CanvasPlayerMiniView;
-            miniView.refresh();
-        });
+        
+        // Close mini view
+        await this.closeMiniView();
     }
 
     async renderChoicesInHud(view: ItemView, data: CanvasData, currentNode: CanvasNode, container: HTMLElement) {
@@ -1491,6 +1495,19 @@ export class CanvasPlayerPlugin extends Plugin {
     }
 
     /**
+     * Close the mini-player view.
+     */
+    async closeMiniView() {
+        const leaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
+        for (const leaf of leaves) {
+            await leaf.setViewState({
+                type: 'empty',
+                active: false
+            });
+        }
+    }
+
+    /**
      * Stop the active session.
      */
     async stopActiveSession() {
@@ -1535,11 +1552,9 @@ export class CanvasPlayerPlugin extends Plugin {
         
         // Update UI
         this.updateStatusBar();
-        const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
-        miniLeaves.forEach(leaf => {
-            const miniView = leaf.view as CanvasPlayerMiniView;
-            miniView.refresh();
-        });
+        
+        // Close mini view
+        await this.closeMiniView();
     }
 
     /**
