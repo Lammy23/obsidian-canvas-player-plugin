@@ -2015,6 +2015,14 @@ class CanvasPlayerModal extends Modal {
                 await this.plugin.minimizePlayer();
             });
         
+        // Stop button
+        new ButtonComponent(controls)
+            .setButtonText('Stop')
+            .onClick(async () => {
+                await this.plugin.stopActiveSession();
+                this.close();
+            });
+        
         // Timer display (top-right) - created after buttons so it appears on the right, only if enabled
         this.timerEl = null;
         if (this.plugin.settings.enableTimeboxing) {
