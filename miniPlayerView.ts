@@ -79,15 +79,17 @@ export class CanvasPlayerMiniView extends ItemView {
             this.updateTimerDisplay(this.plugin.sharedTimer.getRemainingMs());
         }
 
-        // Action buttons - only Restore button (read-only mode)
-        const actionsSection = this.contentContainer.createDiv({ cls: 'canvas-player-mini-actions' });
-        
-        new ButtonComponent(actionsSection)
-            .setButtonText('Restore')
-            .setCta()
-            .onClick(async () => {
-                await this.plugin.restorePlayer();
-            });
+        // Action buttons - only show Restore button if player is minimized
+        if (this.plugin.isPlayerMinimized()) {
+            const actionsSection = this.contentContainer.createDiv({ cls: 'canvas-player-mini-actions' });
+            
+            new ButtonComponent(actionsSection)
+                .setButtonText('Restore')
+                .setCta()
+                .onClick(async () => {
+                    await this.plugin.restorePlayer();
+                });
+        }
     }
 
     private updateNodeDisplay(session: ActiveSession) {

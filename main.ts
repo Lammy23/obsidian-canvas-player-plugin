@@ -1391,12 +1391,17 @@ export class CanvasPlayerPlugin extends Plugin {
         
         // Close modal (but keep session active)
         if (this.activeModal) {
+            // Set flag so close() actually closes the modal DOM element
+            this.activeModal.isMinimizing = true;
             this.activeModal.close();
             this.activeModal = null;
         }
         
         // Ensure mini view is open
         await this.ensureMiniViewOpen();
+        
+        // Refresh mini view to show Restore button
+        await this.updateAllUIs();
     }
 
     /**
@@ -1424,6 +1429,9 @@ export class CanvasPlayerPlugin extends Plugin {
             // Restore camera mode
             await this.restoreCameraMode();
         }
+        
+        // Refresh mini view to hide Restore button
+        await this.updateAllUIs();
     }
 
     /**
@@ -1439,6 +1447,9 @@ export class CanvasPlayerPlugin extends Plugin {
         
         // Ensure mini view is open
         await this.ensureMiniViewOpen();
+        
+        // Refresh mini view to show Restore button
+        await this.updateAllUIs();
     }
 
     /**
@@ -1467,8 +1478,29 @@ export class CanvasPlayerPlugin extends Plugin {
             }, 300);
         });
         
-        // Refresh mini view
+        // Refresh mini view to hide Restore button
         await this.updateAllUIs();
+    }
+
+    /**
+     * Check if the player is currently minimized.
+     */
+    isPlayerMinimized(): boolean {
+        if (!this.activeSession) return false;
+        
+        // Reader mode: minimized if modal is closed
+        if (this.settings.mode === 'modal') {
+            return this.activeModal === null;
+        }
+        
+        // Camera mode: minimized if HUD exists but is hidden
+        if (this.cameraModeView) {
+            if (!this.activeHud) return false;
+            // Check if HUD is hidden (using offsetParent which is null for hidden elements)
+            return this.activeHud.offsetParent === null;
+        }
+        
+        return false;
     }
 
     /**
@@ -1945,6 +1977,8 @@ class CanvasPlayerModal extends Modal {
     private plugin: CanvasPlayerPlugin;
     private timerEl: HTMLElement | null = null;
     private timerUnsubscribe: (() => void) | null = null;
+    private shouldActuallyClose: boolean = false; // Flag to track if we should actually close (Stop button) vs minimize
+    private isMinimizing: boolean = false; // Flag to prevent recursion when minimizePlayer calls close()
 
     constructor(plugin: CanvasPlayerPlugin, canvasFile: TFile, canvasData: CanvasData, startNode: CanvasNode, initialState?: GameState, initialStack?: StackFrame[], rootCanvasFile?: TFile) {
         super(plugin.app);
@@ -1959,6 +1993,51 @@ class CanvasPlayerModal extends Modal {
             this.timerUnsubscribe = this.plugin.sharedTimer.subscribe((remainingMs) => {
                 this.updateTimerDisplay(remainingMs);
             });
+        }
+        
+        // Intercept backdrop clicks to minimize instead of close
+        // Obsidian modals close when clicking outside the modal content
+        // We intercept this by overriding close(), but we can also prevent the click event
+        // The modal container is typically the parent element
+        const modalContainer = this.modalEl.closest('.modal-container') || this.modalEl.parentElement;
+        if (modalContainer) {
+            modalContainer.addEventListener('click', (evt) => {
+                const target = evt.target as HTMLElement;
+                // If click is on backdrop or container (not on modal content), minimize
+                if ((target === modalContainer || target.classList.contains('modal-backdrop')) && 
+                    !this.modalEl.contains(target)) {
+                    evt.preventDefault();
+                    evt.stopPropagation();
+                    void this.plugin.minimizePlayer();
+                }
+            }, true); // Use capture phase to intercept before default handler
+        }
+        
+        // Intercept X button clicks to minimize instead of close
+        const closeButton = this.modalEl.querySelector('.modal-close-button');
+        if (closeButton) {
+            closeButton.addEventListener('click', (evt) => {
+                evt.preventDefault();
+                evt.stopPropagation();
+                void this.plugin.minimizePlayer();
+            });
+        }
+    }
+    
+    // Override close() to minimize instead of closing (unless shouldActuallyClose is true)
+    close() {
+        if (this.shouldActuallyClose || this.isMinimizing) {
+            // Actually close the modal (either Stop button or called from minimizePlayer)
+            this.shouldActuallyClose = false; // Reset flag
+            this.isMinimizing = false; // Reset flag
+            super.close();
+        } else if (this.plugin.activeSession) {
+            // Minimize instead of closing (only if session is active)
+            // Don't set isMinimizing here - minimizePlayer() will set it before calling close()
+            void this.plugin.minimizePlayer();
+        } else {
+            // No active session, actually close
+            super.close();
         }
     }
     
@@ -2042,6 +2121,8 @@ class CanvasPlayerModal extends Modal {
         new ButtonComponent(controls)
             .setButtonText('Stop')
             .onClick(async () => {
+                // Set flag to actually close
+                this.shouldActuallyClose = true;
                 await this.plugin.stopActiveSession();
                 this.close();
             });
