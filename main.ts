@@ -875,8 +875,12 @@ export class CanvasPlayerPlugin extends Plugin {
         // Update UI
         this.updateStatusBar();
         
-        // Close mini view
-        await this.closeMiniView();
+        // Refresh mini view to show empty state
+        const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
+        miniLeaves.forEach(leaf => {
+            const miniView = leaf.view as CanvasPlayerMiniView;
+            miniView.refresh();
+        });
     }
 
     async renderChoicesInHud(view: ItemView, data: CanvasData, currentNode: CanvasNode, container: HTMLElement) {
@@ -1553,8 +1557,12 @@ export class CanvasPlayerPlugin extends Plugin {
         // Update UI
         this.updateStatusBar();
         
-        // Close mini view
-        await this.closeMiniView();
+        // Refresh mini view to show empty state
+        const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
+        miniLeaves.forEach(leaf => {
+            const miniView = leaf.view as CanvasPlayerMiniView;
+            miniView.refresh();
+        });
     }
 
     /**
