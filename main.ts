@@ -36,6 +36,9 @@ export class CanvasPlayerPlugin extends Plugin {
     activeModal: CanvasPlayerModal | null = null; // Track if modal is open
     statusBarItem: HTMLElement | null = null; // Status bar timer item
     statusBarUnsubscribe: (() => void) | null = null; // Timer subscription for status bar
+    
+    // Track currently focused node element for efficient blur transitions
+    private currentFocusedNodeEl: HTMLElement | null = null;
 
     private readonly actionableView = (view: ItemView): view is ItemView & {
         addAction(icon: string, title: string, callback: () => void): void;
@@ -653,10 +656,12 @@ export class CanvasPlayerPlugin extends Plugin {
         // Initial Move
         this.zoomToNode(view, startNode);
         
-        // Wait for zoom to finish before applying blur (approx 400ms)
-        setTimeout(() => {
-            this.applySpotlight(view, startNode);
-        }, 400);
+        // Apply spotlight after zoom settles (blur will be enabled, node will be focused)
+        requestAnimationFrame(() => {
+            setTimeout(async () => {
+                await this.applySpotlight(view, startNode);
+            }, 300); // Reduced delay - blur stays active
+        });
     }
 
     async createHud(view: ItemView, data: CanvasData, currentNode: CanvasNode) {
@@ -910,13 +915,10 @@ export class CanvasPlayerPlugin extends Plugin {
                                 return;
                             }
 
-                            // 1. Remove spotlight (clear view for movement)
-                            this.removeSpotlight(view);
-                            
-                            // 2. Move Camera
+                            // 1. Move Camera (blur stays active, only focused node will change)
                             this.zoomToNode(view, nextNode);
                             
-                            // 3. Update timer context and restart timer for next node (if enabled)
+                            // 2. Update timer context and restart timer for next node (if enabled)
                             this.currentNodeForTimer = nextNode;
                             if (this.settings.enableTimeboxing) {
                                 const timerEl = this.activeHud?.querySelector('.canvas-player-timer') as HTMLElement;
@@ -925,13 +927,16 @@ export class CanvasPlayerPlugin extends Plugin {
                                 }
                             }
                             
-                            // 4. Render next buttons immediately
+                            // 3. Render next buttons immediately
                             this.renderChoicesInHud(view, data, nextNode, container);
                             
-                            // 5. Re-apply spotlight after movement settles
-                            setTimeout(() => {
-                                this.applySpotlight(view, nextNode);
-                            }, 500); // 500ms allows the smooth zoom to finish
+                            // 4. Update spotlight to new node (smooth transition, no blur gap)
+                            // Use requestAnimationFrame for smoother timing, then small delay for zoom to settle
+                            requestAnimationFrame(() => {
+                                setTimeout(async () => {
+                                    await this.applySpotlight(view, nextNode);
+                                }, 300); // Reduced delay - blur stays active, only focused node changes
+                            });
                         }
                     })
                     .buttonEl.addClass('canvas-player-btn');
@@ -989,9 +994,13 @@ export class CanvasPlayerPlugin extends Plugin {
         // 5. Start playing in new context
         await this.createHud(newView, newData, startNode);
         this.zoomToNode(newView, startNode);
-        setTimeout(() => {
-            this.applySpotlight(newView, startNode);
-        }, 400);
+        // Clear previous focused node since we're in a new canvas
+        this.currentFocusedNodeEl = null;
+        requestAnimationFrame(() => {
+            setTimeout(async () => {
+                await this.applySpotlight(newView, startNode);
+            }, 300); // Reduced delay - blur stays active
+        });
     }
 
     async popStackAndReturn() {
@@ -1021,45 +1030,189 @@ export class CanvasPlayerPlugin extends Plugin {
         
         // Zoom to that node
         this.zoomToNode(view, frame.currentNode);
-        setTimeout(() => {
-            this.applySpotlight(view, frame.currentNode);
-        }, 400);
+        // Clear previous focused node since we're returning to a different canvas
+        this.currentFocusedNodeEl = null;
+        requestAnimationFrame(() => {
+            setTimeout(async () => {
+                await this.applySpotlight(view, frame.currentNode);
+            }, 300); // Reduced delay - blur stays active
+        });
     }
 
     removeSpotlight(view?: ItemView) {
-        // Remove is-focused class from all nodes
+        // Clear tracked focused node
+        if (this.currentFocusedNodeEl) {
+            try {
+                this.currentFocusedNodeEl.classList.remove('is-focused');
+            } catch (e) {
+                // Node might have been removed from DOM
+            }
+            this.currentFocusedNodeEl = null;
+        }
+        
+        // Remove is-focused class from all nodes (fallback cleanup)
         if (view) {
-            const allFocusedNodes = view.contentEl.querySelectorAll('.canvas-node.is-focused');
-            allFocusedNodes.forEach(node => node.classList.remove('is-focused'));
+            // Safety check: ensure view and contentEl exist
+            if (!view || !view.contentEl) {
+                return;
+            }
             
-            // Find canvas wrapper and remove focus mode attribute
-            const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
-                                 view.contentEl.querySelector('.canvas')?.parentElement;
-            if (canvasWrapper) {
-                canvasWrapper.removeAttribute('data-focus-mode-enabled');
+            try {
+                const allFocusedNodes = view.contentEl.querySelectorAll('.canvas-node.is-focused');
+                allFocusedNodes.forEach(node => node.classList.remove('is-focused'));
+                
+                // Find canvas wrapper and remove focus mode attribute
+                const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
+                                     view.contentEl.querySelector('.canvas')?.parentElement;
+                if (canvasWrapper) {
+                    canvasWrapper.removeAttribute('data-focus-mode-enabled');
+                }
+            } catch (e) {
+                console.warn('Canvas Player: Error removing spotlight from view', e);
             }
         } else {
             // Fallback: remove from all canvas views if view not provided
-            this.app.workspace.iterateAllLeaves((leaf) => {
-                if (leaf.view.getViewType() === 'canvas') {
-                    const view = leaf.view as ItemView;
-                    const allFocusedNodes = view.contentEl.querySelectorAll('.canvas-node.is-focused');
-                    allFocusedNodes.forEach(node => node.classList.remove('is-focused'));
-                    
-                    const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
-                                         view.contentEl.querySelector('.canvas')?.parentElement;
-                    if (canvasWrapper) {
-                        canvasWrapper.removeAttribute('data-focus-mode-enabled');
+            try {
+                this.app.workspace.iterateAllLeaves((leaf) => {
+                    try {
+                        if (!leaf.view || leaf.view.getViewType() !== 'canvas') {
+                            return;
+                        }
+                        
+                        const view = leaf.view as ItemView;
+                        // Safety check: ensure view and contentEl exist
+                        if (!view || !view.contentEl) {
+                            return;
+                        }
+                        
+                        const allFocusedNodes = view.contentEl.querySelectorAll('.canvas-node.is-focused');
+                        allFocusedNodes.forEach(node => node.classList.remove('is-focused'));
+                        
+                        const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
+                                             view.contentEl.querySelector('.canvas')?.parentElement;
+                        if (canvasWrapper) {
+                            canvasWrapper.removeAttribute('data-focus-mode-enabled');
+                        }
+                    } catch (e) {
+                        // Silently skip invalid views
+                        console.warn('Canvas Player: Error processing view in removeSpotlight', e);
                     }
-                }
-            });
+                });
+            } catch (e) {
+                console.warn('Canvas Player: Error iterating leaves in removeSpotlight', e);
+            }
         }
     }
 
-    applySpotlight(view: ItemView, node: CanvasNode) {
-        // First, remove focus from any previously focused node
-        this.removeSpotlight(view);
+    /**
+     * Find a canvas node element in the DOM with retry logic and multiple selector strategies.
+     * @param view The canvas view
+     * @param node The canvas node to find
+     * @param maxRetries Maximum number of retry attempts (default: 5)
+     * @param initialDelay Initial delay in milliseconds (default: 100)
+     * @returns The found node element or null
+     */
 
+    async findCanvasNode(view: ItemView, node: CanvasNode, maxRetries: number = 5, initialDelay: number = 100): Promise<HTMLElement | null> {
+        // Primary approach: Use Canvas API to get node object, then access its DOM element
+        const canvas = (view as any).canvas;
+        if (canvas && canvas.nodes) {
+            try {
+                // canvas.nodes is a Map where keys are node IDs
+                // Try both Map.get() method and bracket notation
+                const canvasNode = canvas.nodes.get?.(node.id) || canvas.nodes[node.id];
+                
+                if (canvasNode) {
+                    // Try common property names for the DOM element reference
+                    const domElement = canvasNode.nodeEl || 
+                                     canvasNode.el || 
+                                     canvasNode.element || 
+                                     canvasNode.domEl ||
+                                     canvasNode.containerEl;
+                    
+                    if (domElement && domElement instanceof HTMLElement) {
+                        console.log(`Canvas Player: Found node ${node.id} via Canvas API`);
+                        return domElement;
+                    } else {
+                        console.warn(`Canvas Player: Found canvas node object for ${node.id} but no DOM element reference`);
+                    }
+                }
+            } catch (e) {
+                console.warn('Canvas Player: Error accessing canvas.nodes API:', e);
+            }
+        }
+
+        // Fallback: DOM-based approach with retry logic
+        // This handles cases where Canvas API isn't available or node isn't in the map yet
+        const selectors = [
+            `.canvas-node[data-id="${node.id}"]`,
+            `.canvas-node[data-node-id="${node.id}"]`,
+            `[data-id="${node.id}"].canvas-node`,
+            `[data-node-id="${node.id}"].canvas-node`
+        ];
+
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            // Try each selector strategy
+            for (const selector of selectors) {
+                const element = view.contentEl.querySelector(selector) as HTMLElement;
+                if (element) {
+                    console.log(`Canvas Player: Found node ${node.id} using DOM selector "${selector}" on attempt ${attempt + 1}`);
+                    return element;
+                }
+            }
+
+            // Fallback: Try to find by querying all nodes and matching ID
+            if (attempt === 0 || attempt === 2) {
+                const allNodes = view.contentEl.querySelectorAll('.canvas-node');
+                for (const nodeEl of allNodes) {
+                    const el = nodeEl as HTMLElement;
+                    // Check various ways the ID might be stored in DOM
+                    const nodeId = el.getAttribute('data-id') || 
+                                  el.getAttribute('data-node-id') ||
+                                  (el as any).dataset?.id ||
+                                  (el as any).dataset?.nodeId ||
+                                  el.id;
+                    
+                    if (nodeId === node.id) {
+                        console.log(`Canvas Player: Found node ${node.id} by iterating DOM nodes on attempt ${attempt + 1}`);
+                        return el;
+                    }
+                }
+            }
+
+            // If not found, wait before retrying (exponential backoff)
+            if (attempt < maxRetries - 1) {
+                const delay = initialDelay * Math.pow(2, attempt);
+                console.log(`Canvas Player: Node ${node.id} not found, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                
+                // Try Canvas API again after delay (node might have been added to the map)
+                if (canvas && canvas.nodes) {
+                    try {
+                        const canvasNode = canvas.nodes.get?.(node.id) || canvas.nodes[node.id];
+                        if (canvasNode) {
+                            const domElement = canvasNode.nodeEl || 
+                                             canvasNode.el || 
+                                             canvasNode.element || 
+                                             canvasNode.domEl ||
+                                             canvasNode.containerEl;
+                            if (domElement && domElement instanceof HTMLElement) {
+                                console.log(`Canvas Player: Found node ${node.id} via Canvas API on retry ${attempt + 1}`);
+                                return domElement;
+                            }
+                        }
+                    } catch (e) {
+                        // Continue to next attempt
+                    }
+                }
+            }
+        }
+
+        console.warn(`Canvas Player: Could not find node element with id ${node.id} after ${maxRetries} attempts`);
+        return null;
+    }
+
+    async applySpotlight(view: ItemView, node: CanvasNode) {
         // Find the canvas wrapper element
         // Try .canvas-wrapper first, then fall back to .canvas parent
         const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
@@ -1070,17 +1223,26 @@ export class CanvasPlayerPlugin extends Plugin {
             return;
         }
 
-        // Enable focus mode on the canvas wrapper
+        // Enable focus mode on the canvas wrapper (keep blur active throughout transition)
         canvasWrapper.setAttribute('data-focus-mode-enabled', 'true');
 
-        // Find the current node DOM element
-        const targetEl = view.contentEl.querySelector(`.canvas-node[data-id="${node.id}"]`);
+        // Find the current node DOM element using retry logic
+        const targetEl = await this.findCanvasNode(view, node);
         
         if (targetEl) {
+            // Remove is-focused from previously focused node (if different)
+            if (this.currentFocusedNodeEl && this.currentFocusedNodeEl !== targetEl) {
+                this.currentFocusedNodeEl.classList.remove('is-focused');
+            }
+            
             // Add is-focused class to the current node
             targetEl.classList.add('is-focused');
+            this.currentFocusedNodeEl = targetEl;
+            console.log(`Canvas Player: Applied is-focused class to node ${node.id}`);
         } else {
-            console.warn(`Canvas Player: Could not find node element with id ${node.id}`);
+            console.warn(`Canvas Player: Could not apply focus to node ${node.id} - element not found`);
+            // Clear tracked node if we couldn't find the new one
+            this.currentFocusedNodeEl = null;
         }
     }
 
