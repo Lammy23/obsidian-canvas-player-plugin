@@ -21,10 +21,33 @@ If your plugin does not need CSS, delete this file.
     justify-content: space-between;
 }
 
-.canvas-hud-close {
+.canvas-hud-top-controls {
     pointer-events: auto;
-    align-self: flex-end;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
     margin: 20px;
+}
+
+.canvas-player-timer {
+    font-family: var(--font-monospace);
+    font-size: 1.1em;
+    font-weight: 500;
+    padding: 5px 12px;
+    background-color: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 5px;
+    color: var(--text-normal);
+    user-select: none;
+}
+
+.canvas-player-timer-negative {
+    color: var(--text-error, #d32f2f);
+    border-color: var(--text-error, #d32f2f);
+}
+
+.canvas-hud-close {
     background-color: var(--background-primary);
     border: 1px solid var(--background-modifier-border);
     padding: 5px 15px;
@@ -72,9 +95,31 @@ If your plugin does not need CSS, delete this file.
     transition: opacity 0.3s ease;
 }
 
+/* --- FOCUS MODE (Camera Mode Blur) --- */
+/* Blur all nodes except the focused one when focus mode is enabled */
+[data-focus-mode-enabled="true"] .canvas-node:not(.is-focused) {
+    filter: blur(5px);
+}
+
+[data-focus-mode-enabled="true"] .canvas-edges {
+    filter: blur(5px);
+}
+
+[data-focus-mode-enabled="true"] .canvas-path-label-wrapper {
+    filter: blur(5px);
+}
+
 /* --- READER MODE STYLES (Keep these for the other mode) --- */
 .canvas-player-container { display: flex; flex-direction: column; height: 100%; padding: 10px; }
-.canvas-player-controls { display: flex; gap: 10px; margin-bottom: 10px; }
+.canvas-player-controls { 
+    display: flex; 
+    gap: 10px; 
+    margin-bottom: 10px; 
+    align-items: center;
+}
+.canvas-player-controls .canvas-player-timer {
+    margin-left: auto;
+}
 .canvas-player-text { font-size: 1.2em; flex-grow: 1; overflow-y: auto; margin-bottom: 20px; }
 .canvas-player-choices { display: flex; flex-direction: column; gap: 10px; }
 
@@ -93,21 +138,110 @@ If your plugin does not need CSS, delete this file.
     opacity: 1 !important;
 }
 
-/* --- COMPLEXITY SCORE --- */
-.canvas-complexity-score {
-    font-family: var(--font-monospace);
-    font-size: 0.8em;
-    color: var(--text-muted);
-    margin-right: 10px;
-    padding: 2px 5px;
-    border-radius: 4px;
-    background-color: var(--background-secondary);
-    border: 1px solid var(--background-modifier-border);
-    cursor: help;
-    user-select: none;
+/* --- MINI PLAYER VIEW STYLES --- */
+.canvas-player-mini-container {
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    height: 100%;
+    overflow-y: auto;
 }
 
-.canvas-complexity-score:hover {
-    background-color: var(--background-modifier-hover);
+.canvas-player-mini-empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 20px;
+}
+
+.canvas-player-mini-header {
+    border-bottom: 1px solid var(--background-modifier-border);
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+}
+
+.canvas-player-mini-canvas-name {
+    font-weight: 600;
+    font-size: 1.1em;
     color: var(--text-normal);
 }
+
+.canvas-player-mini-node {
+    margin-bottom: 10px;
+}
+
+.canvas-player-mini-node-text {
+    color: var(--text-normal);
+    font-size: 0.95em;
+    padding: 8px;
+    background-color: var(--background-secondary);
+    border-radius: 4px;
+    word-wrap: break-word;
+}
+
+.canvas-player-mini-timer-section {
+    margin: 10px 0;
+}
+
+.canvas-player-mini-timer {
+    font-family: var(--font-monospace);
+    font-size: 1.2em;
+    font-weight: 600;
+    padding: 8px 12px;
+    background-color: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 5px;
+    color: var(--text-normal);
+    text-align: center;
+    display: inline-block;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.canvas-player-mini-timer.canvas-player-timer-negative {
+    color: var(--text-error, #d32f2f);
+    border-color: var(--text-error, #d32f2f);
+}
+
+.canvas-player-mini-choices {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-grow: 1;
+    margin: 10px 0;
+}
+
+.canvas-player-mini-prompt {
+    margin: 10px 0;
+    padding: 10px;
+    background-color: var(--background-secondary);
+    border-radius: 5px;
+}
+
+.canvas-player-mini-prompt-header {
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: var(--text-normal);
+}
+
+.canvas-player-mini-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+/* --- STATUS BAR STYLES --- */
+.canvas-player-statusbar-item {
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: 3px;
+    transition: background-color 0.2s;
+}
+
+.canvas-player-statusbar-item:hover {
+    background-color: var(--background-modifier-hover);
+}
+

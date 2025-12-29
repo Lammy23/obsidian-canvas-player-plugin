@@ -9,13 +9,18 @@ A plugin for [Obsidian](https://obsidian.md) that allows you to "play" your Canv
     -   **Reader Mode (Modal)**: Displays text in a focused popup window, similar to a text adventure game.
     -   **Camera Mode**: Smoothly pans and zooms the canvas view to the active node, dimming the surroundings.
 -   **Variable State Management**: Create complex, branching narratives by tracking choices and variables.
--   **Start Anywhere**: Play from the beginning or right-click any card to "Play from here".
+-   **Resume Playback**: The plugin remembers where you stopped and allows you to resume exactly where you left off, including variable state and nested canvas navigation.
+-   **Start Anywhere**: Play from the beginning, resume from your last position, or right-click any card to "Play from here".
 
 ## Usage
 
 1.  Open a Canvas file.
-2.  Run the command **"Play Current Canvas"** (or click the "Play" button in the canvas header).
+2.  Choose how to start:
+    -   **Play from start**: Run the command **"Play current canvas (from start)"** or click the "Play from start" button in the canvas header. This starts from the beginning of the canvas.
+    -   **Play from last**: Run the command **"Play current canvas (from last)"** or click the "Play from last" button in the canvas header. This resumes from where you last stopped, restoring your position, variable state, and nested canvas stack.
+    -   **Play from here**: Right-click any card and select "Play from here" to start playback from that specific node.
 3.  Follow the path! Click the buttons to choose your next step.
+4.  When you're done, click "Stop Playing" or close the modal. Your position is automatically saved, so you can resume later using "Play from last".
 
 ## Variable State Syntax
 
