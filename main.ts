@@ -56,7 +56,7 @@ export class CanvasPlayerPlugin extends Plugin {
     private lastSeenPersistedOwnerDeviceId: string | null = null;
     
     // Debounced reload handler for reactive sync
-    private debouncedReloadSessionState: (() => Promise<void>) | null = null;
+    private debouncedReloadSessionState: ReturnType<typeof debounce<[], Promise<void>>> | null = null;
 
     private readonly actionableView = (view: ItemView): view is ItemView & {
         addAction(icon: string, title: string, callback: () => void): void;
