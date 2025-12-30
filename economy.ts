@@ -169,3 +169,4 @@ export function getEquippedStickerId(economy: EconomyData): string {
     return economy.equippedStickerId || 'sticker.star';
 }
 
+
