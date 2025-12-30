@@ -79,10 +79,25 @@ export class CanvasPlayerMiniView extends ItemView {
             this.updateTimerDisplay(this.plugin.sharedTimer.getRemainingMs());
         }
 
-        // Action buttons - only show Restore button if player is minimized
-        if (this.plugin.isPlayerMinimized()) {
-            const actionsSection = this.contentContainer.createDiv({ cls: 'canvas-player-mini-actions' });
+        // Action buttons
+        const actionsSection = this.contentContainer.createDiv({ cls: 'canvas-player-mini-actions' });
+        
+        // Check if this device is the owner of the session
+        const isOwner = await this.isSessionOwner();
+        
+        if (!isOwner) {
+            // Read-only mode: show readonly notice and takeover button
+            const readonlyNotice = actionsSection.createDiv({ cls: 'canvas-player-mini-readonly' });
+            readonlyNotice.textContent = 'Read-only (owned by another device)';
             
+            new ButtonComponent(actionsSection)
+                .setButtonText('Take over')
+                .setCta()
+                .onClick(async () => {
+                    await this.plugin.takeOverSession();
+                });
+        } else if (this.plugin.isPlayerMinimized()) {
+            // Owner and minimized: show Restore button
             new ButtonComponent(actionsSection)
                 .setButtonText('Restore')
                 .setCta()
@@ -133,6 +148,13 @@ export class CanvasPlayerMiniView extends ItemView {
                 this.updateTimerDisplay(remainingMs);
             });
         }
+    }
+
+    /**
+     * Check if this device is the owner of the current session.
+     */
+    private async isSessionOwner(): Promise<boolean> {
+        return await this.plugin.isOwnerOfCurrentSession();
     }
 }
 

@@ -45,6 +45,12 @@ export interface PersistedActiveSession {
     historyNodeIds: string[];
     timerStartTimeMs: number;
     timerDurationMs: number;
+    /** Device ID that owns this session (can write to it) */
+    ownerDeviceId: string;
+    /** Timestamp of last update (milliseconds since epoch) */
+    updatedAtMs: number;
+    /** Device ID that made the last update */
+    updatedByDeviceId: string;
 }
 
 /**

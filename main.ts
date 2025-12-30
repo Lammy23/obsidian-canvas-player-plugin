@@ -10,6 +10,7 @@ import { resetTimeboxingRecursive } from './timeboxingReset';
 import { SharedCountdownTimer, formatRemainingTime } from './sharedCountdownTimer';
 import { ActiveSession, createActiveSession, cloneActiveSession } from './playerSession';
 import { CanvasPlayerMiniView, CANVAS_PLAYER_MINI_VIEW_TYPE } from './miniPlayerView';
+import { getOrCreateDeviceId } from './deviceId';
 
 export class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
@@ -44,11 +45,23 @@ export class CanvasPlayerPlugin extends Plugin {
     // Track currently focused node element for efficient blur transitions
     private currentFocusedNodeEl: HTMLElement | null = null;
 
+    // Device ID for cross-device session ownership
+    private deviceId: string = '';
+    
+    // Track last applied activeSessionState timestamp to avoid redundant reloads
+    private lastAppliedSessionStateTimestamp: number = 0;
+    
+    // Debounced reload handler for reactive sync
+    private debouncedReloadSessionState: (() => Promise<void>) | null = null;
+
     private readonly actionableView = (view: ItemView): view is ItemView & {
         addAction(icon: string, title: string, callback: () => void): void;
     } => typeof (view as ItemView & { addAction?: unknown }).addAction === 'function';
 
     async onload() {
+        // Initialize device ID (must be done before loadPluginData to check ownership)
+        this.deviceId = getOrCreateDeviceId(this.manifest.id);
+        
         await this.loadPluginData();
 
         // Register mini-player view
@@ -76,6 +89,9 @@ export class CanvasPlayerPlugin extends Plugin {
                 await this.restoreActiveSessionState();
             }
             this.refreshCanvasViewActions();
+            
+            // Set up reactive sync watcher
+            this.setupReactiveSyncWatcher();
         });
 
         this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
@@ -152,6 +168,18 @@ export class CanvasPlayerPlugin extends Plugin {
             checkCallback: (checking: boolean) => {
                 if (this.activeModal) {
                     if (!checking) void this.minimizePlayer();
+                    return true;
+                }
+                return false;
+            }
+        });
+
+        this.addCommand({
+            id: 'canvas-player-takeover',
+            name: 'Take over session',
+            checkCallback: (checking: boolean) => {
+                if (this.activeSession) {
+                    if (!checking) void this.takeOverSession();
                     return true;
                 }
                 return false;
@@ -408,23 +436,36 @@ export class CanvasPlayerPlugin extends Plugin {
     /**
      * Save the current active session state for timer persistence across restart.
      * Only persists when timeboxing is enabled.
+     * Enforces single-writer: only the owner device can write (unless creating new session or after takeover).
      */
-    private async saveActiveSessionState(): Promise<void> {
+    private async saveActiveSessionState(forceOwnership: boolean = false): Promise<void> {
         const currentData = (await this.loadData()) as PluginData | null;
 
         if (!this.settings.enableTimeboxing || !this.activeSession || !this.activeSessionMode) {
-            // Clear persisted state if it exists
+            // Clear persisted state if it exists (only if we're the owner)
             if (currentData?.activeSessionState) {
-                const pluginData: PluginData = {
-                    settings: this.settings,
-                    resumeSessions: currentData?.resumeSessions || {},
-                    activeSessionState: undefined
-                };
-                await this.saveData(pluginData);
+                if (this.isOwnerOfPersistedSession(currentData.activeSessionState) || forceOwnership) {
+                    const pluginData: PluginData = {
+                        settings: this.settings,
+                        resumeSessions: currentData?.resumeSessions || {},
+                        activeSessionState: undefined
+                    };
+                    await this.saveData(pluginData);
+                }
             }
             return;
         }
 
+        // Check ownership: if there's an existing session, we must be the owner (unless forceOwnership)
+        if (currentData?.activeSessionState && !forceOwnership) {
+            if (!this.isOwnerOfPersistedSession(currentData.activeSessionState)) {
+                // Not the owner - don't write
+                console.log('Canvas Player: Cannot save session state - not the owner device');
+                return;
+            }
+        }
+
+        const now = Date.now();
         const persisted: PersistedActiveSession = {
             mode: this.activeSessionMode,
             rootFilePath: this.activeSession.rootCanvasFile.path,
@@ -437,8 +478,11 @@ export class CanvasPlayerPlugin extends Plugin {
                 state: { ...frame.state }
             })),
             historyNodeIds: this.activeSession.history.map(n => n.id),
-            timerStartTimeMs: this.activeSession.timerStartTimeMs ?? Date.now(),
-            timerDurationMs: this.activeSession.timerDurationMs
+            timerStartTimeMs: this.activeSession.timerStartTimeMs ?? now,
+            timerDurationMs: this.activeSession.timerDurationMs,
+            ownerDeviceId: forceOwnership ? this.deviceId : (currentData?.activeSessionState?.ownerDeviceId || this.deviceId),
+            updatedAtMs: now,
+            updatedByDeviceId: this.deviceId
         };
 
         const pluginData: PluginData = {
@@ -447,11 +491,21 @@ export class CanvasPlayerPlugin extends Plugin {
             activeSessionState: persisted
         };
         await this.saveData(pluginData);
+        
+        // Update last applied timestamp to avoid reloading our own writes
+        this.lastAppliedSessionStateTimestamp = now;
     }
 
     private async clearActiveSessionState(): Promise<void> {
         const currentData = (await this.loadData()) as PluginData | null;
         if (!currentData?.activeSessionState) return;
+        
+        // Only clear if we're the owner
+        if (!this.isOwnerOfPersistedSession(currentData.activeSessionState)) {
+            console.log('Canvas Player: Cannot clear session state - not the owner device');
+            return;
+        }
+        
         const pluginData: PluginData = {
             settings: this.settings,
             resumeSessions: currentData?.resumeSessions || {},
@@ -509,6 +563,29 @@ export class CanvasPlayerPlugin extends Plugin {
             };
             this.activeSessionMode = persisted.mode;
 
+            // Handle backward compatibility: if ownership fields are missing, assume we're the owner
+            // and update the persisted state
+            if (!persisted.ownerDeviceId) {
+                // Legacy session without ownership - take ownership and update
+                const now = Date.now();
+                const updatedPersisted: PersistedActiveSession = {
+                    ...persisted,
+                    ownerDeviceId: this.deviceId,
+                    updatedAtMs: now,
+                    updatedByDeviceId: this.deviceId
+                };
+                const currentData = (await this.loadData()) as PluginData | null;
+                const pluginData: PluginData = {
+                    settings: this.settings,
+                    resumeSessions: currentData?.resumeSessions || {},
+                    activeSessionState: updatedPersisted
+                };
+                await this.saveData(pluginData);
+                this.lastAppliedSessionStateTimestamp = now;
+            } else {
+                this.lastAppliedSessionStateTimestamp = persisted.updatedAtMs || Date.now();
+            }
+
             // Restore running timer (wall-clock based)
             this.sharedTimer.restoreFromPersisted(persisted.timerStartTimeMs, persisted.timerDurationMs);
 
@@ -523,6 +600,174 @@ export class CanvasPlayerPlugin extends Plugin {
             new Notice('Canvas Player: Could not restore timer session. Clearing saved state.');
             await this.clearActiveSessionState();
             return false;
+        }
+    }
+
+    /**
+     * Check if this device is the owner of a persisted session.
+     * Handles backward compatibility: if ownership fields are missing, assume we're the owner.
+     */
+    private isOwnerOfPersistedSession(persisted: PersistedActiveSession): boolean {
+        // Backward compatibility: if ownership fields are missing, treat as if we're the owner
+        if (!persisted.ownerDeviceId) {
+            return true;
+        }
+        return persisted.ownerDeviceId === this.deviceId;
+    }
+
+    /**
+     * Public method to check if this device is the owner of the current session.
+     * Used by UI components.
+     */
+    async isOwnerOfCurrentSession(): Promise<boolean> {
+        if (!this.activeSession) return true; // No session = can be owner
+        
+        const currentData = (await this.loadData()) as PluginData | null;
+        const persisted = currentData?.activeSessionState;
+        
+        if (!persisted) return true; // No persisted state = we can be owner
+        
+        return this.isOwnerOfPersistedSession(persisted);
+    }
+
+    /**
+     * Check if this device can control the active session (is owner).
+     * Shows a notice if not the owner.
+     * Note: This is a synchronous check that uses cached data. For accurate checks, use async version.
+     * @returns true if can control, false if readonly
+     */
+    private assertCanControlOrNotify(): boolean {
+        if (!this.activeSession) return true; // No session = can control (will create new)
+        
+        // Try to get persisted state synchronously (may not be available)
+        // We'll do a proper async check in saveActiveSessionState
+        // This is just a quick guard for UI actions
+        return true; // Let saveActiveSessionState handle the actual ownership check
+    }
+    
+    /**
+     * Async check if this device can control the active session (is owner).
+     * @returns true if can control, false if readonly
+     */
+    private async assertCanControlAsync(): Promise<boolean> {
+        if (!this.activeSession) return true; // No session = can control (will create new)
+        
+        const currentData = (await this.loadData()) as PluginData | null;
+        const persisted = currentData?.activeSessionState;
+        
+        if (persisted && !this.isOwnerOfPersistedSession(persisted)) {
+            new Notice('Canvas Player: Session is read-only. Click "Take over" to control it.');
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
+     * Take over the active session (become the owner).
+     */
+    async takeOverSession(): Promise<void> {
+        if (!this.activeSession) {
+            new Notice('Canvas Player: No active session to take over.');
+            return;
+        }
+
+        // Force ownership by writing with forceOwnership=true
+        await this.saveActiveSessionState(true);
+        
+        new Notice('Canvas Player: You now control this session.');
+        
+        // Refresh UI to update readonly/takeover button
+        await this.updateAllUIs();
+    }
+
+    /**
+     * Set up reactive sync watcher to detect when data.json changes via Obsidian Sync.
+     */
+    private setupReactiveSyncWatcher(): void {
+        // Debounce reloads to avoid double-firing
+        this.debouncedReloadSessionState = debounce(async () => {
+            await this.reloadSessionStateIfNewer();
+        }, 300, true);
+
+        // Watch for vault file modifications
+        // The plugin data file is at: .obsidian/plugins/{pluginId}/data.json
+        const dataPath = `${this.app.vault.configDir}/plugins/${this.manifest.id}/data.json`;
+        
+        this.registerEvent(
+            this.app.vault.on('modify', (file) => {
+                // Check if this is our plugin data file
+                if (file.path === dataPath) {
+                    // Debounced reload
+                    if (this.debouncedReloadSessionState) {
+                        this.debouncedReloadSessionState();
+                    }
+                }
+            })
+        );
+
+        // Optional: Lightweight polling fallback (every 2 seconds) in case file events don't fire reliably
+        // Only poll if we're not the owner (follower mode)
+        this.registerInterval(window.setInterval(async () => {
+            if (!this.settings.enableTimeboxing) return;
+            
+            const currentData = (await this.loadData()) as PluginData | null;
+            const persisted = currentData?.activeSessionState;
+            
+            // Only poll if there's a persisted session and we're not the owner
+            if (persisted && !this.isOwnerOfPersistedSession(persisted)) {
+                // Check if timestamp is newer than what we last applied
+                if (persisted.updatedAtMs > this.lastAppliedSessionStateTimestamp) {
+                    await this.reloadSessionStateIfNewer();
+                }
+            }
+        }, 2000));
+    }
+
+    /**
+     * Reload and apply session state if a newer version exists.
+     */
+    private async reloadSessionStateIfNewer(): Promise<void> {
+        if (!this.settings.enableTimeboxing) return;
+
+        const currentData = (await this.loadData()) as PluginData | null;
+        const persisted = currentData?.activeSessionState;
+        
+        if (!persisted) {
+            // Remote cleared the session - clear local if we have one
+            // Check if we had a local session that we owned (to avoid clearing our own active session)
+            if (this.activeSession) {
+                // If we have a local session but no persisted state, it might be that
+                // we just started it locally and it hasn't synced yet, or remote cleared it.
+                // To be safe, only clear if we're sure we're not the owner of any persisted state.
+                // Since persisted is null, we can safely clear.
+                this.activeSession = null;
+                this.activeSessionMode = null;
+                this.sharedTimer.abort();
+                this.updateStatusBar();
+                await this.updateAllUIs();
+            }
+            this.lastAppliedSessionStateTimestamp = 0;
+            return;
+        }
+
+        // Check if this is newer than what we last applied
+        if (persisted.updatedAtMs <= this.lastAppliedSessionStateTimestamp) {
+            return; // Already applied this version
+        }
+
+        // If we're the owner, don't reload (we just wrote this)
+        if (this.isOwnerOfPersistedSession(persisted)) {
+            this.lastAppliedSessionStateTimestamp = persisted.updatedAtMs;
+            return;
+        }
+
+        // We're not the owner - reload the session state
+        try {
+            await this.restoreActiveSessionState();
+            this.lastAppliedSessionStateTimestamp = persisted.updatedAtMs;
+        } catch (e) {
+            console.error('Canvas Player: Failed to reload session state from sync', e);
         }
     }
 
@@ -1703,6 +1948,9 @@ export class CanvasPlayerPlugin extends Plugin {
     async stopActiveSession() {
         if (!this.activeSession) return;
         
+        // Check ownership before stopping (but allow if we're owner)
+        if (!(await this.assertCanControlAsync())) return;
+        
         // Save resume session before stopping
         await this.saveResumeSession(this.activeSession.rootCanvasFile.path, {
             rootFilePath: this.activeSession.rootCanvasFile.path,
@@ -1759,6 +2007,9 @@ export class CanvasPlayerPlugin extends Plugin {
     async navigateBack() {
         if (!this.activeSession || this.activeSession.history.length === 0) return;
         
+        // Check ownership before navigation
+        if (!(await this.assertCanControlAsync())) return;
+        
         const previousNode = this.activeSession.history.pop();
         if (!previousNode) return;
         
@@ -1782,6 +2033,9 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async navigateToNode(parsedChoice: any, nextNode: CanvasNode) {
         if (!this.activeSession) return;
+        
+        // Check ownership before navigation
+        if (!(await this.assertCanControlAsync())) return;
         
         // Finish timer for current node
         if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
@@ -1820,6 +2074,9 @@ export class CanvasPlayerPlugin extends Plugin {
             await this.stopActiveSession();
             return;
         }
+        
+        // Check ownership before navigation
+        if (!(await this.assertCanControlAsync())) return;
         
         // Finish timer for current node
         if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
@@ -2422,3 +2679,4 @@ class CanvasPlayerModal extends Modal {
 }
 
 export default CanvasPlayerPlugin;
+
