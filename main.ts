@@ -50,6 +50,10 @@ export class CanvasPlayerPlugin extends Plugin {
     
     // Track last applied activeSessionState timestamp to avoid redundant reloads
     private lastAppliedSessionStateTimestamp: number = 0;
+
+    // Track whether we've ever seen a persisted session (so we can react when it gets cleared remotely)
+    private lastSeenHadPersistedSession: boolean = false;
+    private lastSeenPersistedOwnerDeviceId: string | null = null;
     
     // Debounced reload handler for reactive sync
     private debouncedReloadSessionState: (() => Promise<void>) | null = null;
@@ -706,21 +710,13 @@ export class CanvasPlayerPlugin extends Plugin {
             })
         );
 
-        // Optional: Lightweight polling fallback (every 2 seconds) in case file events don't fire reliably
-        // Only poll if we're not the owner (follower mode)
+        // Optional: Lightweight polling fallback (every 2 seconds) in case file events don't fire reliably.
+        // Important: also detect remote clears (persisted session disappearing).
         this.registerInterval(window.setInterval(async () => {
             if (!this.settings.enableTimeboxing) return;
-            
-            const currentData = (await this.loadData()) as PluginData | null;
-            const persisted = currentData?.activeSessionState;
-            
-            // Only poll if there's a persisted session and we're not the owner
-            if (persisted && !this.isOwnerOfPersistedSession(persisted)) {
-                // Check if timestamp is newer than what we last applied
-                if (persisted.updatedAtMs > this.lastAppliedSessionStateTimestamp) {
-                    await this.reloadSessionStateIfNewer();
-                }
-            }
+
+            // Always check: we need to react both to updates and to remote clears.
+            await this.reloadSessionStateIfNewer();
         }, 2000));
     }
 
@@ -732,24 +728,32 @@ export class CanvasPlayerPlugin extends Plugin {
 
         const currentData = (await this.loadData()) as PluginData | null;
         const persisted = currentData?.activeSessionState;
-        
+
         if (!persisted) {
-            // Remote cleared the session - clear local if we have one
-            // Check if we had a local session that we owned (to avoid clearing our own active session)
-            if (this.activeSession) {
-                // If we have a local session but no persisted state, it might be that
-                // we just started it locally and it hasn't synced yet, or remote cleared it.
-                // To be safe, only clear if we're sure we're not the owner of any persisted state.
-                // Since persisted is null, we can safely clear.
+            // Persisted session disappeared. Only treat this as a remote "Stop" if we previously
+            // saw a persisted session owned by another device.
+            const shouldClearLocal =
+                this.lastSeenHadPersistedSession &&
+                this.lastSeenPersistedOwnerDeviceId !== null &&
+                this.lastSeenPersistedOwnerDeviceId !== this.deviceId;
+
+            if (shouldClearLocal && this.activeSession) {
                 this.activeSession = null;
                 this.activeSessionMode = null;
                 this.sharedTimer.abort();
                 this.updateStatusBar();
                 await this.updateAllUIs();
             }
+
+            this.lastSeenHadPersistedSession = false;
+            this.lastSeenPersistedOwnerDeviceId = null;
             this.lastAppliedSessionStateTimestamp = 0;
             return;
         }
+
+        // Track last-seen persisted session (used to detect remote clears later)
+        this.lastSeenHadPersistedSession = true;
+        this.lastSeenPersistedOwnerDeviceId = persisted.ownerDeviceId ?? null;
 
         // Check if this is newer than what we last applied
         if (persisted.updatedAtMs <= this.lastAppliedSessionStateTimestamp) {
