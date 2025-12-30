@@ -148,6 +148,48 @@ If your plugin does not need CSS, delete this file.
     overflow-y: auto;
 }
 
+.canvas-player-mini-container > * {
+    flex-shrink: 0;
+}
+
+.canvas-player-mini-shop-button-container {
+    margin-top: auto;
+    flex-shrink: 0;
+    padding-top: 15px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.canvas-player-mini-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.canvas-player-mini-points {
+    font-weight: 600;
+    color: var(--text-accent);
+    font-size: 0.9em;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+}
+
+.canvas-player-mini-badge {
+    font-size: 1.5em;
+    line-height: 1;
+    opacity: 0.8;
+    transition: opacity 0.2s, transform 0.2s;
+}
+
+.canvas-player-mini-badge:hover {
+    opacity: 1;
+    transform: scale(1.1);
+}
+
 .canvas-player-mini-empty {
     text-align: center;
     color: var(--text-muted);
@@ -243,5 +285,25 @@ If your plugin does not need CSS, delete this file.
 
 .canvas-player-statusbar-item:hover {
     background-color: var(--background-modifier-hover);
+}
+
+
+/* --- SHOP UI STYLES --- */
+.canvas-player-balance {
+    font-weight: 600;
+    font-size: 1.2em;
+    color: var(--text-accent);
+}
+
+.canvas-player-shop-container,
+.canvas-player-inventory-container {
+    margin-top: 10px;
+    margin-bottom: 20px;
+}
+
+.canvas-player-equipped {
+    color: var(--text-accent);
+    font-weight: 500;
+    font-style: italic;
 }
 

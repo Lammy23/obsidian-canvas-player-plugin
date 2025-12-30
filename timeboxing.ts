@@ -106,8 +106,8 @@ export class NodeTimerController extends Component {
     }
 
     /**
-     * Update the average timing based on a new sample.
-     * Uses incremental mean formula: newAvg = oldAvg + (newValue - oldAvg) / (samples + 1)
+     * @deprecated Use updateRobustAverage from timingStats.ts instead.
+     * Kept for backward compatibility but should not be used for new code.
      */
     static updateAverage(currentAvg: number, currentSamples: number, newElapsedMs: number): TimingData {
         const newSamples = currentSamples + 1;

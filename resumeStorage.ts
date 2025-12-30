@@ -60,6 +60,7 @@ export interface PluginData {
     settings?: any; // CanvasPlayerSettings - using any to avoid circular import
     resumeSessions?: Record<string, ResumeSession>; // Keyed by rootFilePath
     activeSessionState?: PersistedActiveSession;
+    economy?: any; // EconomyData - using any to avoid circular import
 }
 
 /**

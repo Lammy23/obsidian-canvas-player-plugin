@@ -11,9 +11,14 @@ import { SharedCountdownTimer, formatRemainingTime } from './sharedCountdownTime
 import { ActiveSession, createActiveSession, cloneActiveSession } from './playerSession';
 import { CanvasPlayerMiniView, CANVAS_PLAYER_MINI_VIEW_TYPE } from './miniPlayerView';
 import { getOrCreateDeviceId } from './deviceId';
+import { updateRobustAverage } from './timingStats';
+import { calculatePoints, getPointsMessage } from './rewardCurve';
+import { EconomyData, DEFAULT_ECONOMY_DATA, calculateBalance, recordEarn } from './economy';
+import { getShopItem } from './shopCatalog';
 
 export class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
+    economy: EconomyData = { ...DEFAULT_ECONOMY_DATA };
     activeHud: HTMLElement | null = null; 
     activeOverlay: HTMLElement | null = null;
     currentSessionState: GameState = {};
@@ -47,6 +52,13 @@ export class CanvasPlayerPlugin extends Plugin {
 
     // Device ID for cross-device session ownership
     private deviceId: string = '';
+
+    /**
+     * Get the device ID (for economy transactions).
+     */
+    getDeviceId(): string {
+        return this.deviceId;
+    }
     
     // Track last applied activeSessionState timestamp to avoid redundant reloads
     private lastAppliedSessionStateTimestamp: number = 0;
@@ -366,24 +378,41 @@ export class CanvasPlayerPlugin extends Plugin {
             // Old format: data is directly the settings object
             const pluginData: PluginData = {
                 settings: rawData,
-                resumeSessions: {}
+                resumeSessions: {},
+                economy: DEFAULT_ECONOMY_DATA
             };
             this.settings = Object.assign({}, DEFAULT_SETTINGS, pluginData.settings);
+            this.economy = pluginData.economy || { ...DEFAULT_ECONOMY_DATA };
             // Migrate: save new format
             await this.saveData(pluginData);
         } else {
             // New format: has settings and resumeSessions
             const pluginData = rawData as PluginData;
             this.settings = Object.assign({}, DEFAULT_SETTINGS, pluginData?.settings || {});
+            this.economy = pluginData?.economy || { ...DEFAULT_ECONOMY_DATA };
             
             // Ensure resumeSessions exists
-            if (!pluginData?.resumeSessions) {
+            if (!pluginData?.resumeSessions || !pluginData?.economy) {
                 const updatedData: PluginData = {
                     settings: this.settings,
-                    resumeSessions: {},
-                    activeSessionState: pluginData?.activeSessionState
+                    resumeSessions: pluginData?.resumeSessions || {},
+                    activeSessionState: pluginData?.activeSessionState,
+                    economy: this.economy
                 };
                 await this.saveData(updatedData);
+            } else {
+                // Prune stale resume sessions (cheap checks only)
+                const pruneResult = this.pruneResumeSessionsCheap(pluginData);
+                if (pruneResult.pruned > 0) {
+                    const cleanedData: PluginData = {
+                        settings: this.settings,
+                        resumeSessions: pruneResult.updatedResumeSessions,
+                        activeSessionState: pluginData.activeSessionState,
+                        economy: this.economy
+                    };
+                    await this.saveData(cleanedData);
+                    console.log(`Canvas Player: Pruned ${pruneResult.pruned} stale resume session(s), kept ${pruneResult.kept}`);
+                }
             }
         }
         
@@ -396,12 +425,57 @@ export class CanvasPlayerPlugin extends Plugin {
         }
     }
 
+    /**
+     * Prune stale resume sessions using cheap checks (file existence only).
+     * Does not validate node IDs or read canvas contents.
+     * @returns Pruning statistics and filtered resume sessions
+     */
+    private pruneResumeSessionsCheap(pluginData: PluginData): {
+        pruned: number;
+        kept: number;
+        updatedResumeSessions: Record<string, ResumeSession>;
+    } {
+        const resumeSessions = pluginData.resumeSessions || {};
+        const filtered: Record<string, ResumeSession> = {};
+        let pruned = 0;
+        let kept = 0;
+
+        for (const [key, session] of Object.entries(resumeSessions)) {
+            // Check if key matches rootFilePath (corruption/mismatch check)
+            if (key !== session.rootFilePath) {
+                pruned++;
+                continue;
+            }
+
+            // Check if root file exists and is a canvas
+            const rootFile = this.app.vault.getAbstractFileByPath(session.rootFilePath);
+            if (!(rootFile instanceof TFile) || rootFile.extension !== 'canvas') {
+                pruned++;
+                continue;
+            }
+
+            // Check if current file exists and is a canvas
+            const currentFile = this.app.vault.getAbstractFileByPath(session.currentFilePath);
+            if (!(currentFile instanceof TFile) || currentFile.extension !== 'canvas') {
+                pruned++;
+                continue;
+            }
+
+            // Session passed all cheap checks - keep it
+            filtered[key] = session;
+            kept++;
+        }
+
+        return { pruned, kept, updatedResumeSessions: filtered };
+    }
+
     async savePluginData(): Promise<void> {
         const currentData = (await this.loadData()) as PluginData | null;
         const pluginData: PluginData = {
             settings: this.settings,
             resumeSessions: currentData?.resumeSessions || {},
-            activeSessionState: currentData?.activeSessionState
+            activeSessionState: currentData?.activeSessionState,
+            economy: this.economy
         };
         await this.saveData(pluginData);
         
@@ -414,7 +488,8 @@ export class CanvasPlayerPlugin extends Plugin {
         const pluginData: PluginData = {
             settings: this.settings,
             resumeSessions: { ...(currentData?.resumeSessions || {}), [rootFilePath]: session },
-            activeSessionState: currentData?.activeSessionState
+            activeSessionState: currentData?.activeSessionState,
+            economy: currentData?.economy ?? this.economy
         };
         await this.saveData(pluginData);
     }
@@ -432,7 +507,8 @@ export class CanvasPlayerPlugin extends Plugin {
         const pluginData: PluginData = {
             settings: this.settings,
             resumeSessions: remainingSessions,
-            activeSessionState: currentData?.activeSessionState
+            activeSessionState: currentData?.activeSessionState,
+            economy: currentData?.economy ?? this.economy
         };
         await this.saveData(pluginData);
     }
@@ -452,7 +528,8 @@ export class CanvasPlayerPlugin extends Plugin {
                     const pluginData: PluginData = {
                         settings: this.settings,
                         resumeSessions: currentData?.resumeSessions || {},
-                        activeSessionState: undefined
+                        activeSessionState: undefined,
+                        economy: currentData?.economy ?? this.economy
                     };
                     await this.saveData(pluginData);
                 }
@@ -492,7 +569,8 @@ export class CanvasPlayerPlugin extends Plugin {
         const pluginData: PluginData = {
             settings: this.settings,
             resumeSessions: currentData?.resumeSessions || {},
-            activeSessionState: persisted
+            activeSessionState: persisted,
+            economy: currentData?.economy ?? this.economy
         };
         await this.saveData(pluginData);
         
@@ -513,7 +591,8 @@ export class CanvasPlayerPlugin extends Plugin {
         const pluginData: PluginData = {
             settings: this.settings,
             resumeSessions: currentData?.resumeSessions || {},
-            activeSessionState: undefined
+            activeSessionState: undefined,
+            economy: currentData?.economy ?? this.economy
         };
         await this.saveData(pluginData);
     }
@@ -582,7 +661,8 @@ export class CanvasPlayerPlugin extends Plugin {
                 const pluginData: PluginData = {
                     settings: this.settings,
                     resumeSessions: currentData?.resumeSessions || {},
-                    activeSessionState: updatedPersisted
+                    activeSessionState: updatedPersisted,
+                    economy: currentData?.economy ?? this.economy
                 };
                 await this.saveData(pluginData);
                 this.lastAppliedSessionStateTimestamp = now;
@@ -591,7 +671,10 @@ export class CanvasPlayerPlugin extends Plugin {
             }
 
             // Restore running timer (wall-clock based)
-            this.sharedTimer.restoreFromPersisted(persisted.timerStartTimeMs, persisted.timerDurationMs);
+            // Default to countdown mode for restored timers (they would have had timing data)
+            // TODO: Store mode in persisted state for future compatibility
+            const mode: 'countdown' | 'countup' = persisted.timerDurationMs > 0 ? 'countdown' : 'countup';
+            this.sharedTimer.restoreFromPersisted(persisted.timerStartTimeMs, persisted.timerDurationMs, mode);
 
             // Update status bar and show mini view
             this.updateStatusBar();
@@ -953,8 +1036,7 @@ export class CanvasPlayerPlugin extends Plugin {
             
             if (this.settings.enableTimeboxing) {
                 const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
-                const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
-                timerDurationMs = timingData ? timingData.avgMs : defaultMs;
+                timerDurationMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : 0;
             }
             
             this.activeSession = createActiveSession(
@@ -969,11 +1051,8 @@ export class CanvasPlayerPlugin extends Plugin {
             this.activeSessionMode = 'modal';
             
             // Start shared timer if timeboxing is enabled
-            if (this.settings.enableTimeboxing && timerDurationMs > 0) {
-                this.activeSession.timerStartTimeMs = Date.now();
-                this.sharedTimer.start(timerDurationMs);
-                // Persist state after timer starts
-                await this.saveActiveSessionState();
+            if (this.settings.enableTimeboxing) {
+                await this.startTimerForActiveSession();
             }
             
             // Update status bar
@@ -993,8 +1072,7 @@ export class CanvasPlayerPlugin extends Plugin {
             
             if (this.settings.enableTimeboxing) {
                 const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
-                const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
-                timerDurationMs = timingData ? timingData.avgMs : defaultMs;
+                timerDurationMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : 0;
             }
             
             this.activeSession = createActiveSession(
@@ -1009,11 +1087,8 @@ export class CanvasPlayerPlugin extends Plugin {
             this.activeSessionMode = 'camera';
             
             // Start shared timer if timeboxing is enabled
-            if (this.settings.enableTimeboxing && timerDurationMs > 0) {
-                this.activeSession.timerStartTimeMs = Date.now();
-                this.sharedTimer.start(timerDurationMs);
-                // Persist state after timer starts
-                await this.saveActiveSessionState();
+            if (this.settings.enableTimeboxing) {
+                await this.startTimerForActiveSession();
             }
             
             // Update status bar
@@ -1102,7 +1177,8 @@ export class CanvasPlayerPlugin extends Plugin {
         if (this.settings.enableTimeboxing) {
             timerEl = topControls.createDiv({ cls: 'canvas-player-timer' });
             const remainingMs = this.sharedTimer.getRemainingMs();
-            timerEl.setText(formatRemainingTime(remainingMs));
+            const mode = this.sharedTimer.getMode();
+            timerEl.setText(formatRemainingTime(remainingMs, mode));
             
             // Subscribe to timer updates
             if (this.cameraModeTimerUnsubscribe) {
@@ -1110,9 +1186,11 @@ export class CanvasPlayerPlugin extends Plugin {
             }
             this.cameraModeTimerUnsubscribe = this.sharedTimer.subscribe((remainingMs) => {
                 if (timerEl) {
-                    const formatted = formatRemainingTime(remainingMs);
+                    const mode = this.sharedTimer.getMode();
+                    const formatted = formatRemainingTime(remainingMs, mode);
                     timerEl.setText(formatted);
-                    if (remainingMs < 0) {
+                    // Only show negative styling in countdown mode
+                    if (mode === 'countdown' && remainingMs < 0) {
                         timerEl.addClass('canvas-player-timer-negative');
                     } else {
                         timerEl.removeClass('canvas-player-timer-negative');
@@ -1158,8 +1236,10 @@ export class CanvasPlayerPlugin extends Plugin {
         if (!canvasFile) return;
 
         const timingData = await loadTimingForNode(this.app, canvasFile, node, data);
-        const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
-        const initialMs = timingData ? timingData.avgMs : defaultMs;
+        // Legacy method: use countdown if timing exists, otherwise use a default (5 min) for backward compatibility
+        // Note: This is deprecated - new code uses startTimerForActiveSession
+        const defaultMs = 5 * 60 * 1000; // 5 minutes fallback for legacy code
+        const initialMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : defaultMs;
 
         // Create and start timer
         this.cameraTimer = new NodeTimerController();
@@ -1186,16 +1266,8 @@ export class CanvasPlayerPlugin extends Plugin {
             this.currentCanvasData
         );
 
-        let newTiming: TimingData;
-        if (existingTiming) {
-            newTiming = NodeTimerController.updateAverage(
-                existingTiming.avgMs,
-                existingTiming.samples,
-                elapsedMs
-            );
-        } else {
-            newTiming = { avgMs: elapsedMs, samples: 1 };
-        }
+        // Update timing using robust average (even in deprecated method for consistency)
+        const newTiming = updateRobustAverage(existingTiming, elapsedMs);
 
         // Save timing back
         const canvasNeedsSave = await saveTimingForNode(
@@ -1768,7 +1840,8 @@ export class CanvasPlayerPlugin extends Plugin {
         
         this.statusBarItem.show();
         const remainingMs = this.sharedTimer.getRemainingMs();
-        const formatted = formatRemainingTime(remainingMs);
+        const mode = this.sharedTimer.getMode();
+        const formatted = formatRemainingTime(remainingMs, mode);
         this.statusBarItem.setText(`Canvas Player: ${formatted}`);
     }
 
@@ -2165,6 +2238,7 @@ export class CanvasPlayerPlugin extends Plugin {
 
     /**
      * Start timer for the current node in active session.
+     * Uses countdown if node has learned average, count-up if it's the first completion.
      */
     private async startTimerForActiveSession() {
         if (!this.activeSession || !this.settings.enableTimeboxing) return;
@@ -2175,12 +2249,19 @@ export class CanvasPlayerPlugin extends Plugin {
             this.activeSession.currentNode,
             this.activeSession.currentCanvasData
         );
-        const defaultMs = this.settings.defaultNodeDurationMinutes * 60 * 1000;
-        const durationMs = timingData ? timingData.avgMs : defaultMs;
         
-        this.activeSession.timerDurationMs = durationMs;
-        this.activeSession.timerStartTimeMs = Date.now();
-        this.sharedTimer.start(durationMs);
+        if (timingData && timingData.avgMs > 0) {
+            // Node has learned average: countdown mode
+            const durationMs = timingData.avgMs;
+            this.activeSession.timerDurationMs = durationMs;
+            this.activeSession.timerStartTimeMs = Date.now();
+            this.sharedTimer.start(durationMs, 'countdown');
+        } else {
+            // First completion: count-up mode (calibration)
+            this.activeSession.timerDurationMs = 0;
+            this.activeSession.timerStartTimeMs = Date.now();
+            this.sharedTimer.start(0, 'countup');
+        }
         
         this.updateStatusBar();
 
@@ -2190,6 +2271,7 @@ export class CanvasPlayerPlugin extends Plugin {
 
     /**
      * Finish and save timer for current node in active session.
+     * Awards points if this is not the first completion (calibration).
      */
     private async finishTimerForActiveSession() {
         if (!this.activeSession || !this.settings.enableTimeboxing || !this.sharedTimer.isRunning()) {
@@ -2206,15 +2288,24 @@ export class CanvasPlayerPlugin extends Plugin {
             this.activeSession.currentCanvasData
         );
         
-        let newTiming: TimingData;
-        if (existingTiming) {
-            newTiming = NodeTimerController.updateAverage(
-                existingTiming.avgMs,
-                existingTiming.samples,
-                elapsedMs
-            );
+        // Update timing using robust average
+        const newTiming = updateRobustAverage(existingTiming, elapsedMs);
+        
+        // Award points only if this is NOT the first completion (calibration)
+        if (existingTiming && existingTiming.avgMs > 0) {
+            const points = calculatePoints(elapsedMs, existingTiming.avgMs);
+            if (points > 0) {
+                const ratio = elapsedMs / existingTiming.avgMs;
+                const message = getPointsMessage(points, ratio);
+                recordEarn(this.economy, this.deviceId, points, {
+                    nodeId: this.activeSession.currentNode.id
+                });
+                await this.savePluginData();
+                new Notice(message);
+            }
         } else {
-            newTiming = { avgMs: elapsedMs, samples: 1 };
+            // First completion: calibration only, no points
+            // (Silent - user just learned the baseline)
         }
         
         // Save timing back
@@ -2371,7 +2462,7 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('Enable timeboxing timer')
-            .setDesc('Show a countdown timer for each node based on average completion time.')
+            .setDesc('Show a timer for each node. First completion counts up to learn the average; subsequent runs use countdown.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.enableTimeboxing)
                 .onChange(async (value) => {
@@ -2379,19 +2470,10 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
-            .setName('Default node duration (minutes)')
-            .setDesc('Default countdown time for nodes that have not been timed yet.')
-            .addText(text => text
-                .setPlaceholder('5')
-                .setValue(this.plugin.settings.defaultNodeDurationMinutes.toString())
-                .onChange(async (value) => {
-                    const numValue = parseInt(value, 10);
-                    if (!isNaN(numValue) && numValue > 0 && numValue <= 999) {
-                        this.plugin.settings.defaultNodeDurationMinutes = numValue;
-                        await this.plugin.saveSettings();
-                    }
-                }));
+        containerEl.createEl('p', {
+            text: 'Averages are learned per node after the first completion. No default duration is needed.',
+            cls: 'setting-item-description'
+        });
 
         containerEl.createEl('h2', { text: 'Start Node Requirement' });
         containerEl.createEl('p', { 
@@ -2490,9 +2572,11 @@ class CanvasPlayerModal extends Modal {
     
     private updateTimerDisplay(remainingMs: number) {
         if (!this.timerEl) return;
-        const formatted = formatRemainingTime(remainingMs);
+        const mode = this.plugin.sharedTimer.getMode();
+        const formatted = formatRemainingTime(remainingMs, mode);
         this.timerEl.setText(formatted);
-        if (remainingMs < 0) {
+        // Only show negative styling in countdown mode
+        if (mode === 'countdown' && remainingMs < 0) {
             this.timerEl.addClass('canvas-player-timer-negative');
         } else {
             this.timerEl.removeClass('canvas-player-timer-negative');
