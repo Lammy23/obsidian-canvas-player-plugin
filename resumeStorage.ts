@@ -32,11 +32,34 @@ export interface ResumeStackFrame {
 }
 
 /**
+ * Persisted active session state for timer persistence across Obsidian restarts.
+ * Only used when timeboxing is enabled.
+ */
+export interface PersistedActiveSession {
+    mode: 'modal' | 'camera';
+    rootFilePath: string;
+    currentFilePath: string;
+    currentNodeId: string;
+    state: GameState;
+    stack: ResumeStackFrame[];
+    historyNodeIds: string[];
+    timerStartTimeMs: number;
+    timerDurationMs: number;
+    /** Device ID that owns this session (can write to it) */
+    ownerDeviceId: string;
+    /** Timestamp of last update (milliseconds since epoch) */
+    updatedAtMs: number;
+    /** Device ID that made the last update */
+    updatedByDeviceId: string;
+}
+
+/**
  * Plugin data structure containing both settings and resume sessions.
  */
 export interface PluginData {
     settings?: any; // CanvasPlayerSettings - using any to avoid circular import
     resumeSessions?: Record<string, ResumeSession>; // Keyed by rootFilePath
+    activeSessionState?: PersistedActiveSession;
 }
 
 /**

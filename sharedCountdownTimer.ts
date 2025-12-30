@@ -30,6 +30,24 @@ export class SharedCountdownTimer extends Component {
     }
 
     /**
+     * Restore a previously-running timer from persisted wall-clock timestamps.
+     * This will resume 1s ticking and update subscribers.
+     */
+    restoreFromPersisted(timerStartTimeMs: number, timerDurationMs: number): void {
+        this.abort(); // Clean up any existing timer
+        this.initialDurationMs = timerDurationMs;
+        this.startTimeMs = timerStartTimeMs;
+
+        // Initial update
+        this.notifySubscribers();
+
+        // Update every second
+        this.intervalId = window.setInterval(() => {
+            this.notifySubscribers();
+        }, 1000);
+    }
+
+    /**
      * Finish the timer and return elapsed time in milliseconds.
      * Stops the timer but does not clear state (so we can read elapsed time).
      */

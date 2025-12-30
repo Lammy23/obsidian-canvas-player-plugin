@@ -13,7 +13,6 @@ export class CanvasPlayerMiniView extends ItemView {
     private timerDisplay: HTMLElement | null = null;
     private currentCanvasDisplay: HTMLElement | null = null;
     private currentNodeDisplay: HTMLElement | null = null;
-    private choicesContainer: HTMLElement | null = null;
     private contentContainer: HTMLElement | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: CanvasPlayerPlugin) {
@@ -80,34 +79,32 @@ export class CanvasPlayerMiniView extends ItemView {
             this.updateTimerDisplay(this.plugin.sharedTimer.getRemainingMs());
         }
 
-        // Back button (if history exists)
-        if (session.history.length > 0) {
-            new ButtonComponent(this.contentContainer)
-                .setButtonText('← Back')
-                .onClick(async () => {
-                    await this.plugin.navigateBack();
-                });
-        }
-
-        // Choices
-        this.choicesContainer = this.contentContainer.createDiv({ cls: 'canvas-player-mini-choices' });
-        await this.renderChoices(session);
-
         // Action buttons
         const actionsSection = this.contentContainer.createDiv({ cls: 'canvas-player-mini-actions' });
         
-        new ButtonComponent(actionsSection)
-            .setButtonText('Restore')
-            .setCta()
-            .onClick(async () => {
-                await this.plugin.restorePlayer();
-            });
-
-        new ButtonComponent(actionsSection)
-            .setButtonText('Stop')
-            .onClick(async () => {
-                await this.plugin.stopActiveSession();
-            });
+        // Check if this device is the owner of the session
+        const isOwner = await this.isSessionOwner();
+        
+        if (!isOwner) {
+            // Read-only mode: show readonly notice and takeover button
+            const readonlyNotice = actionsSection.createDiv({ cls: 'canvas-player-mini-readonly' });
+            readonlyNotice.textContent = 'Read-only (owned by another device)';
+            
+            new ButtonComponent(actionsSection)
+                .setButtonText('Take over')
+                .setCta()
+                .onClick(async () => {
+                    await this.plugin.takeOverSession();
+                });
+        } else if (this.plugin.isPlayerMinimized()) {
+            // Owner and minimized: show Restore button
+            new ButtonComponent(actionsSection)
+                .setButtonText('Restore')
+                .setCta()
+                .onClick(async () => {
+                    await this.plugin.restorePlayer();
+                });
+        }
     }
 
     private updateNodeDisplay(session: ActiveSession) {
@@ -138,92 +135,6 @@ export class CanvasPlayerMiniView extends ItemView {
         }
     }
 
-    private async renderChoices(session: ActiveSession) {
-        if (!this.choicesContainer) return;
-        this.choicesContainer.empty();
-
-        const { currentCanvasData, currentNode, state } = session;
-        const rawChoices = currentCanvasData.edges.filter((edge: any) => edge.fromNode === currentNode.id);
-        
-        // Parse choices and check for missing variables
-        const parsedChoices = rawChoices.map((edge: any) => {
-            const parsed = LogicEngine.parseLabel(edge.label || "Next");
-            return { edge, parsed };
-        });
-
-        const missingVars = new Set<string>();
-        parsedChoices.forEach((item: any) => {
-            const missing = LogicEngine.getMissingVariables(item.parsed, state);
-            missing.forEach((v: string) => missingVars.add(v));
-        });
-
-        if (missingVars.size > 0) {
-            const promptSection = this.choicesContainer.createDiv({ cls: 'canvas-player-mini-prompt' });
-            promptSection.createEl('div', { 
-                text: 'Set values for missing variables:',
-                cls: 'canvas-player-mini-prompt-header'
-            });
-            
-            missingVars.forEach(variable => {
-                if (state[variable] === undefined) {
-                    state[variable] = false;
-                }
-                new Setting(promptSection)
-                    .setName(variable)
-                    .addToggle(toggle => toggle
-                        .setValue(state[variable])
-                        .onChange(val => {
-                            state[variable] = val;
-                        }));
-            });
-
-            new ButtonComponent(promptSection)
-                .setButtonText("Continue")
-                .setCta()
-                .onClick(() => {
-                    this.render();
-                });
-            return;
-        }
-        
-        // Filter valid choices
-        const validChoices = parsedChoices.filter((item: any) => 
-            LogicEngine.checkConditions(item.parsed, state)
-        );
-
-        if (validChoices.length === 0) {
-            if (session.stack.length > 0) {
-                new ButtonComponent(this.choicesContainer)
-                    .setButtonText("Return to Parent Canvas")
-                    .setCta()
-                    .onClick(async () => {
-                        await this.plugin.navigateReturnToParent();
-                    });
-            } else {
-                new ButtonComponent(this.choicesContainer)
-                    .setButtonText("End of Path")
-                    .onClick(async () => {
-                        await this.plugin.stopActiveSession();
-                    });
-            }
-        } else {
-            validChoices.forEach((choice: any) => {
-                const nextNode = currentCanvasData.nodes.find((n: any) => n.id === choice.edge.toNode);
-                const label = choice.parsed.text || "Next";
-                
-                if (this.choicesContainer) {
-                    new ButtonComponent(this.choicesContainer)
-                        .setButtonText(label)
-                        .onClick(async () => {
-                            if (nextNode) {
-                                await this.plugin.navigateToNode(choice.parsed, nextNode);
-                            }
-                        });
-                }
-            });
-        }
-    }
-
     // Public method to trigger re-render (called by plugin when session changes)
     async refresh() {
         await this.render();
@@ -237,6 +148,13 @@ export class CanvasPlayerMiniView extends ItemView {
                 this.updateTimerDisplay(remainingMs);
             });
         }
+    }
+
+    /**
+     * Check if this device is the owner of the current session.
+     */
+    private async isSessionOwner(): Promise<boolean> {
+        return await this.plugin.isOwnerOfCurrentSession();
     }
 }
 
