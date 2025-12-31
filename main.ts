@@ -19,21 +19,21 @@ import { getShopItem } from './shopCatalog';
 export class CanvasPlayerPlugin extends Plugin {
     settings: CanvasPlayerSettings;
     economy: EconomyData = { ...DEFAULT_ECONOMY_DATA };
-    activeHud: HTMLElement | null = null; 
+    activeHud: HTMLElement | null = null;
     activeOverlay: HTMLElement | null = null;
     currentSessionState: GameState = {};
     stack: StackFrame[] = [];
-    
+
     // Map to track reset stats button elements per view
     resetStatsElements: Map<ItemView, HTMLElement> = new Map();
-    
+
     // Timer state for Camera Mode (legacy, deprecated - camera mode now uses activeSession and sharedTimer)
     // Kept for backward compatibility but no longer used in active code paths
     cameraTimer: NodeTimerController | null = null;
     currentCanvasFile: TFile | null = null;
     currentCanvasData: CanvasData | null = null;
     currentNodeForTimer: CanvasNode | null = null;
-    
+
     // Resume session tracking
     private rootCanvasFile: TFile | null = null; // Track root canvas for saving resume position
 
@@ -46,7 +46,7 @@ export class CanvasPlayerPlugin extends Plugin {
     statusBarItem: HTMLElement | null = null; // Status bar timer item
     statusBarUnsubscribe: (() => void) | null = null; // Timer subscription for status bar
     cameraModeTimerUnsubscribe: (() => void) | null = null; // Timer subscription for camera mode HUD
-    
+
     // Track currently focused node element for efficient blur transitions
     private currentFocusedNodeEl: HTMLElement | null = null;
 
@@ -59,14 +59,14 @@ export class CanvasPlayerPlugin extends Plugin {
     getDeviceId(): string {
         return this.deviceId;
     }
-    
+
     // Track last applied activeSessionState timestamp to avoid redundant reloads
     private lastAppliedSessionStateTimestamp: number = 0;
 
     // Track whether we've ever seen a persisted session (so we can react when it gets cleared remotely)
     private lastSeenHadPersistedSession: boolean = false;
     private lastSeenPersistedOwnerDeviceId: string | null = null;
-    
+
     // Debounced reload handler for reactive sync
     private debouncedReloadSessionState: ReturnType<typeof debounce<[], Promise<void>>> | null = null;
 
@@ -77,7 +77,7 @@ export class CanvasPlayerPlugin extends Plugin {
     async onload() {
         // Initialize device ID (must be done before loadPluginData to check ownership)
         this.deviceId = getOrCreateDeviceId(this.manifest.id);
-        
+
         await this.loadPluginData();
 
         // Register mini-player view
@@ -93,7 +93,7 @@ export class CanvasPlayerPlugin extends Plugin {
         this.statusBarItem.onClickEvent(() => {
             void this.restorePlayer();
         });
-        
+
         // Subscribe status bar to timer updates
         this.statusBarUnsubscribe = this.sharedTimer.subscribe(() => {
             this.updateStatusBar();
@@ -105,7 +105,7 @@ export class CanvasPlayerPlugin extends Plugin {
                 await this.restoreActiveSessionState();
             }
             this.refreshCanvasViewActions();
-            
+
             // Set up reactive sync watcher
             this.setupReactiveSyncWatcher();
         });
@@ -216,12 +216,12 @@ export class CanvasPlayerPlugin extends Plugin {
                             await this.playFromNode(node);
                         });
                 });
-                
+
                 // Add transform menu items
                 this.addTransformMenuItems(menu, node);
             })
         );
-        
+
         // Also register for group-menu as a compatibility hook
         // Some Obsidian builds fire a dedicated group menu event
         this.registerEvent(
@@ -234,34 +234,34 @@ export class CanvasPlayerPlugin extends Plugin {
     onunload() {
         // Clean up shared timer
         this.sharedTimer.abort();
-        
+
         // Unsubscribe status bar
         if (this.statusBarUnsubscribe) {
             this.statusBarUnsubscribe();
             this.statusBarUnsubscribe = null;
         }
-        
+
         // Unsubscribe camera mode timer
         if (this.cameraModeTimerUnsubscribe) {
             this.cameraModeTimerUnsubscribe();
             this.cameraModeTimerUnsubscribe = null;
         }
-        
+
         // Close active modal if any
         if (this.activeModal) {
             this.activeModal.close();
             this.activeModal = null;
         }
-        
+
         // Clean up camera mode
         this.activeHud?.remove();
         this.activeOverlay?.remove();
         this.removeSpotlight();
-        
+
         // Clear active session
         this.activeSession = null;
         this.cameraModeView = null;
-        
+
         // Hide status bar
         if (this.statusBarItem) {
             this.statusBarItem.hide();
@@ -272,66 +272,64 @@ export class CanvasPlayerPlugin extends Plugin {
 
     refreshCanvasViewActions() {
         this.app.workspace.iterateAllLeaves((leaf) => {
-        if (leaf.view.getViewType() !== 'canvas') return;
-    
-        const view = leaf.view as ItemView;
-    
-        // headerEl is not guaranteed across Obsidian versions/timing
-        const headerEl: HTMLElement | null =
-            ((view as any).headerEl as HTMLElement | undefined) ??
-            (view.containerEl?.querySelector?.(".view-header") as HTMLElement | null) ??
-            null;
-    
-        const actionsContainer =
-            headerEl?.querySelector?.(".view-actions") ?? null;
-    
-        // Add Reset Stats button if timeboxing is enabled
-        if (this.settings.enableTimeboxing) {
-            if (!this.resetStatsElements.has(view) && actionsContainer) {
-            const file = ((view as any).file as TFile | null) ?? undefined;
-            if (file && file.extension === "canvas") {
-                const resetBtn = document.createElement("button");
-                resetBtn.textContent = "Reset stats";
-                resetBtn.className = "canvas-reset-stats-btn";
-                resetBtn.setAttribute("aria-label", "Reset timeboxing stats for this canvas");
-                resetBtn.style.marginRight = "10px";
-                resetBtn.style.fontSize = "0.85em";
-                resetBtn.style.padding = "4px 8px";
-                resetBtn.onclick = () => {
-                new ConfirmResetTimeboxingModal(this.app, this, file).open();
-                };
-    
-                actionsContainer.insertBefore(resetBtn, actionsContainer.lastChild);
-                this.resetStatsElements.set(view, resetBtn);
+            if (leaf.view.getViewType() !== 'canvas') return;
+
+            const view = leaf.view as ItemView;
+
+            // headerEl is not guaranteed across Obsidian versions/timing
+            const headerEl: HTMLElement | null =
+                ((view as any).headerEl as HTMLElement | undefined) ??
+                (view.containerEl?.querySelector?.(".view-header") as HTMLElement | null) ??
+                null;
+
+            const actionsContainer =
+                headerEl?.querySelector?.(".view-actions") ?? null;
+
+            // Add Reset Stats button if timeboxing is enabled
+            if (this.settings.enableTimeboxing) {
+                if (!this.resetStatsElements.has(view) && actionsContainer) {
+                    const file = ((view as any).file as TFile | null) ?? undefined;
+                    if (file && file.extension === "canvas") {
+                        const resetBtn = document.createElement("button");
+                        resetBtn.textContent = "Reset stats";
+                        resetBtn.className = "canvas-reset-stats-btn";
+                        resetBtn.setAttribute("aria-label", "Reset timeboxing stats for this canvas");
+                        resetBtn.style.marginRight = "10px";
+                        resetBtn.style.fontSize = "0.85em";
+                        resetBtn.style.padding = "4px 8px";
+                        resetBtn.onclick = () => {
+                            new ConfirmResetTimeboxingModal(this.app, this, file).open();
+                        };
+
+                        actionsContainer.insertBefore(resetBtn, actionsContainer.lastChild);
+                        this.resetStatsElements.set(view, resetBtn);
+                    }
+                }
+            } else {
+                const resetBtn = this.resetStatsElements.get(view);
+                if (resetBtn) {
+                    resetBtn.remove();
+                    this.resetStatsElements.delete(view);
+                }
             }
+
+            // If there's no header yet, don't try to add actions (it may throw internally)
+            if (!headerEl) return;
+
+            // Add Player buttons
+            if (!this.actionableView(view)) return;
+            if ((view as any)._hasCanvasPlayerButton) return;
+
+            try {
+                view.addAction("play", "Play from start", () => this.playActiveCanvas());
+                view.addAction("play-circle", "Play from last", () => void this.playActiveCanvasFromLast());
+                view.addAction("zoom-in", "Zoom to start", () => void this.zoomToStartOfActiveCanvas());
+                (view as any)._hasCanvasPlayerButton = true;
+            } catch (e) {
+                console.warn("Canvas Player: failed to add canvas header actions", e);
             }
-        } else {
-            const resetBtn = this.resetStatsElements.get(view);
-            if (resetBtn) {
-            resetBtn.remove();
-            this.resetStatsElements.delete(view);
-            }
-        }
-    
-        // If there's no header yet, don't try to add actions (it may throw internally)
-        if (!headerEl) return;
-    
-        // Add Player buttons
-        if (!this.actionableView(view)) return;
-        if ((view as any)._hasCanvasPlayerButton) return;
-    
-        try {
-            view.addAction("play", "Play from start", () => this.playActiveCanvas());
-            view.addAction("play-circle", "Play from last", () => void this.playActiveCanvasFromLast());
-            view.addAction("zoom-in", "Zoom to start", () => void this.zoomToStartOfActiveCanvas());
-            (view as any)._hasCanvasPlayerButton = true;
-        } catch (e) {
-            console.warn("Canvas Player: failed to add canvas header actions", e);
-        }
         });
     }
-  
-  // ... existing code ...
 
     getStartNode(data: CanvasData): CanvasNode | null {
         const startText = this.settings.startText?.toLowerCase().trim();
@@ -366,13 +364,13 @@ export class CanvasPlayerPlugin extends Plugin {
         // Get the first node the marker points to
         const targetNodeId = edgesFromMarker[0].toNode;
         const targetNode = data.nodes.find(n => n.id === targetNodeId);
-        
+
         return targetNode || null;
     }
 
     async loadPluginData(): Promise<void> {
         const rawData = await this.loadData();
-        
+
         // Migration: if data is flat (old format), wrap it
         if (rawData && !rawData.settings && !rawData.resumeSessions) {
             // Old format: data is directly the settings object
@@ -390,7 +388,7 @@ export class CanvasPlayerPlugin extends Plugin {
             const pluginData = rawData as PluginData;
             this.settings = Object.assign({}, DEFAULT_SETTINGS, pluginData?.settings || {});
             this.economy = pluginData?.economy || { ...DEFAULT_ECONOMY_DATA };
-            
+
             // Ensure resumeSessions exists
             if (!pluginData?.resumeSessions || !pluginData?.economy) {
                 const updatedData: PluginData = {
@@ -415,7 +413,7 @@ export class CanvasPlayerPlugin extends Plugin {
                 }
             }
         }
-        
+
         // Clean up any old complexity-related settings that might exist
         if ('showComplexityScore' in this.settings) {
             delete (this.settings as any).showComplexityScore;
@@ -478,7 +476,7 @@ export class CanvasPlayerPlugin extends Plugin {
             economy: this.economy
         };
         await this.saveData(pluginData);
-        
+
         // Refresh UI based on new settings
         this.refreshCanvasViewActions();
     }
@@ -502,7 +500,7 @@ export class CanvasPlayerPlugin extends Plugin {
     async clearResumeSession(rootFilePath: string): Promise<void> {
         const currentData = (await this.loadData()) as PluginData | null;
         if (!currentData?.resumeSessions) return;
-        
+
         const { [rootFilePath]: _, ...remainingSessions } = currentData.resumeSessions;
         const pluginData: PluginData = {
             settings: this.settings,
@@ -573,7 +571,7 @@ export class CanvasPlayerPlugin extends Plugin {
             economy: currentData?.economy ?? this.economy
         };
         await this.saveData(pluginData);
-        
+
         // Update last applied timestamp to avoid reloading our own writes
         this.lastAppliedSessionStateTimestamp = now;
     }
@@ -581,13 +579,13 @@ export class CanvasPlayerPlugin extends Plugin {
     private async clearActiveSessionState(): Promise<void> {
         const currentData = (await this.loadData()) as PluginData | null;
         if (!currentData?.activeSessionState) return;
-        
+
         // Only clear if we're the owner
         if (!this.isOwnerOfPersistedSession(currentData.activeSessionState)) {
             console.log('Canvas Player: Cannot clear session state - not the owner device');
             return;
         }
-        
+
         const pluginData: PluginData = {
             settings: this.settings,
             resumeSessions: currentData?.resumeSessions || {},
@@ -708,12 +706,12 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async isOwnerOfCurrentSession(): Promise<boolean> {
         if (!this.activeSession) return true; // No session = can be owner
-        
+
         const currentData = (await this.loadData()) as PluginData | null;
         const persisted = currentData?.activeSessionState;
-        
+
         if (!persisted) return true; // No persisted state = we can be owner
-        
+
         return this.isOwnerOfPersistedSession(persisted);
     }
 
@@ -725,28 +723,28 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     private assertCanControlOrNotify(): boolean {
         if (!this.activeSession) return true; // No session = can control (will create new)
-        
+
         // Try to get persisted state synchronously (may not be available)
         // We'll do a proper async check in saveActiveSessionState
         // This is just a quick guard for UI actions
         return true; // Let saveActiveSessionState handle the actual ownership check
     }
-    
+
     /**
      * Async check if this device can control the active session (is owner).
      * @returns true if can control, false if readonly
      */
     private async assertCanControlAsync(): Promise<boolean> {
         if (!this.activeSession) return true; // No session = can control (will create new)
-        
+
         const currentData = (await this.loadData()) as PluginData | null;
         const persisted = currentData?.activeSessionState;
-        
+
         if (persisted && !this.isOwnerOfPersistedSession(persisted)) {
             new Notice('Canvas Player: Session is read-only. Click "Take over" to control it.');
             return false;
         }
-        
+
         return true;
     }
 
@@ -761,9 +759,9 @@ export class CanvasPlayerPlugin extends Plugin {
 
         // Force ownership by writing with forceOwnership=true
         await this.saveActiveSessionState(true);
-        
+
         new Notice('Canvas Player: You now control this session.');
-        
+
         // Refresh UI to update readonly/takeover button
         await this.updateAllUIs();
     }
@@ -780,7 +778,7 @@ export class CanvasPlayerPlugin extends Plugin {
         // Watch for vault file modifications
         // The plugin data file is at: .obsidian/plugins/{pluginId}/data.json
         const dataPath = `${this.app.vault.configDir}/plugins/${this.manifest.id}/data.json`;
-        
+
         this.registerEvent(
             this.app.vault.on('modify', (file) => {
                 // Check if this is our plugin data file
@@ -949,12 +947,12 @@ export class CanvasPlayerPlugin extends Plugin {
         if (!nodeInfo) {
             return;
         }
-        
+
         const { id, type } = nodeInfo;
-        
+
         // Add separator before transform options
         menu.addSeparator();
-        
+
         // Card to Group conversion
         if (type === 'text' || type === 'file') {
             menu.addItem((item: any) => {
@@ -966,7 +964,7 @@ export class CanvasPlayerPlugin extends Plugin {
                     });
             });
         }
-        
+
         // Group to Card conversion
         if (type === 'group') {
             menu.addItem((item: any) => {
@@ -1033,12 +1031,12 @@ export class CanvasPlayerPlugin extends Plugin {
             // Create active session for modal mode
             const rootFile = this.rootCanvasFile ?? canvasFile;
             let timerDurationMs = 0;
-            
+
             if (this.settings.enableTimeboxing) {
                 const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
                 timerDurationMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : 0;
             }
-            
+
             this.activeSession = createActiveSession(
                 rootFile,
                 canvasFile,
@@ -1049,18 +1047,18 @@ export class CanvasPlayerPlugin extends Plugin {
                 timerDurationMs
             );
             this.activeSessionMode = 'modal';
-            
+
             // Start shared timer if timeboxing is enabled
             if (this.settings.enableTimeboxing) {
                 await this.startTimerForActiveSession();
             }
-            
+
             // Update status bar
             this.updateStatusBar();
-            
+
             // Auto-open mini view
             await this.ensureMiniViewOpen();
-            
+
             // Open modal
             const modal = new CanvasPlayerModal(this, canvasFile, canvasData, startNode, initialState, initialStack, rootFile);
             this.activeModal = modal;
@@ -1069,12 +1067,12 @@ export class CanvasPlayerPlugin extends Plugin {
             // For camera mode, create active session (similar to modal mode)
             const rootFile = this.rootCanvasFile ?? canvasFile;
             let timerDurationMs = 0;
-            
+
             if (this.settings.enableTimeboxing) {
                 const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
                 timerDurationMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : 0;
             }
-            
+
             this.activeSession = createActiveSession(
                 rootFile,
                 canvasFile,
@@ -1085,18 +1083,18 @@ export class CanvasPlayerPlugin extends Plugin {
                 timerDurationMs
             );
             this.activeSessionMode = 'camera';
-            
+
             // Start shared timer if timeboxing is enabled
             if (this.settings.enableTimeboxing) {
                 await this.startTimerForActiveSession();
             }
-            
+
             // Update status bar
             this.updateStatusBar();
-            
+
             // Auto-open mini view
             await this.ensureMiniViewOpen();
-            
+
             await this.startCameraMode(canvasData, startNode);
         }
     }
@@ -1146,10 +1144,10 @@ export class CanvasPlayerPlugin extends Plugin {
         this.cameraModeView = view;
 
         await this.createHud(view, data, startNode);
-        
+
         // Initial Move
         this.zoomToNode(view, startNode);
-        
+
         // Apply spotlight after zoom settles (blur will be enabled, node will be focused)
         requestAnimationFrame(() => {
             setTimeout(async () => {
@@ -1171,7 +1169,7 @@ export class CanvasPlayerPlugin extends Plugin {
 
         // Top-right controls container
         const topControls = hudEl.createDiv({ cls: 'canvas-hud-top-controls' });
-        
+
         // Timer display (top-right) - only if timeboxing is enabled
         let timerEl: HTMLElement | null = null;
         if (this.settings.enableTimeboxing) {
@@ -1179,7 +1177,7 @@ export class CanvasPlayerPlugin extends Plugin {
             const remainingMs = this.sharedTimer.getRemainingMs();
             const mode = this.sharedTimer.getMode();
             timerEl.setText(formatRemainingTime(remainingMs, mode));
-            
+
             // Subscribe to timer updates
             if (this.cameraModeTimerUnsubscribe) {
                 this.cameraModeTimerUnsubscribe();
@@ -1198,20 +1196,20 @@ export class CanvasPlayerPlugin extends Plugin {
                 }
             });
         }
-        
+
         // Minimize button
         const minimizeBtn = topControls.createEl('button', { text: 'Minimize', cls: 'canvas-hud-minimize' });
         minimizeBtn.onclick = () => {
             void this.minimizeCameraMode();
         };
-        
+
         const closeBtn = topControls.createEl('button', { text: 'Stop Playing', cls: 'canvas-hud-close' });
         closeBtn.onclick = () => {
-           void this.stopCameraMode();
+            void this.stopCameraMode();
         };
 
         const choicesContainer = hudEl.createDiv({ cls: 'canvas-hud-choices' });
-        
+
         this.renderChoicesInHud(view, data, currentNode, choicesContainer);
     }
 
@@ -1257,7 +1255,7 @@ export class CanvasPlayerPlugin extends Plugin {
         }
 
         const elapsedMs = this.cameraTimer.finish();
-        
+
         // Load existing timing or start fresh
         const existingTiming = await loadTimingForNode(
             this.app,
@@ -1288,40 +1286,40 @@ export class CanvasPlayerPlugin extends Plugin {
     }
 
     async stopCameraMode() {
-         // Save resume session before stopping
-         if (this.activeSession) {
-             const resumeStack: ResumeStackFrame[] = this.activeSession.stack.map(frame => ({
-                 filePath: frame.file.path,
-                 currentNodeId: frame.currentNode.id,
-                 state: { ...frame.state }
-             }));
+        // Save resume session before stopping
+        if (this.activeSession) {
+            const resumeStack: ResumeStackFrame[] = this.activeSession.stack.map(frame => ({
+                filePath: frame.file.path,
+                currentNodeId: frame.currentNode.id,
+                state: { ...frame.state }
+            }));
 
-             const session: ResumeSession = {
-                 rootFilePath: this.activeSession.rootCanvasFile.path,
-                 currentFilePath: this.activeSession.currentCanvasFile.path,
-                 currentNodeId: this.activeSession.currentNode.id,
-                 currentSessionState: { ...this.activeSession.state },
-                 stack: resumeStack
-             };
+            const session: ResumeSession = {
+                rootFilePath: this.activeSession.rootCanvasFile.path,
+                currentFilePath: this.activeSession.currentCanvasFile.path,
+                currentNodeId: this.activeSession.currentNode.id,
+                currentSessionState: { ...this.activeSession.state },
+                stack: resumeStack
+            };
 
-             await this.saveResumeSession(this.activeSession.rootCanvasFile.path, session);
-         }
+            await this.saveResumeSession(this.activeSession.rootCanvasFile.path, session);
+        }
 
-         // Stopping should NOT affect node averages
-         this.abortTimerForActiveSession();
-         
-         // Clean up timer subscription
-         if (this.cameraModeTimerUnsubscribe) {
-             this.cameraModeTimerUnsubscribe();
-             this.cameraModeTimerUnsubscribe = null;
-         }
-         
-         // Abort shared timer
-         this.sharedTimer.abort();
-         
+        // Stopping should NOT affect node averages
+        this.abortTimerForActiveSession();
+
+        // Clean up timer subscription
+        if (this.cameraModeTimerUnsubscribe) {
+            this.cameraModeTimerUnsubscribe();
+            this.cameraModeTimerUnsubscribe = null;
+        }
+
+        // Abort shared timer
+        this.sharedTimer.abort();
+
         // Remove spotlight from all views
         this.removeSpotlight();
-        
+
         this.activeHud?.remove();
         this.activeOverlay?.remove();
         this.activeHud = null;
@@ -1332,10 +1330,10 @@ export class CanvasPlayerPlugin extends Plugin {
 
         // Clear persisted active session state
         await this.clearActiveSessionState();
-        
+
         // Update UI
         this.updateStatusBar();
-        
+
         // Refresh mini view to show empty state
         const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
         miniLeaves.forEach(leaf => {
@@ -1346,21 +1344,21 @@ export class CanvasPlayerPlugin extends Plugin {
 
     async renderChoicesInHud(view: ItemView, data: CanvasData, currentNode: CanvasNode, container: HTMLElement) {
         if (!this.activeSession) return;
-        
+
         container.empty();
 
         // Handle Markdown File Nodes (Embedded Notes)
         if (currentNode.type === 'file' && currentNode.file && !currentNode.file.endsWith('.canvas')) {
-             const file = this.app.metadataCache.getFirstLinkpathDest(currentNode.file, (view as any).file?.path || "");
-             if (file instanceof TFile) {
-                 const content = await this.app.vault.read(file);
-                 const contentEl = container.createDiv({ cls: 'canvas-player-note-content' });
-                 await MarkdownRenderer.render(this.app, content, contentEl, file.path, this as unknown as Component);
-             }
+            const file = this.app.metadataCache.getFirstLinkpathDest(currentNode.file, (view as any).file?.path || "");
+            if (file instanceof TFile) {
+                const content = await this.app.vault.read(file);
+                const contentEl = container.createDiv({ cls: 'canvas-player-note-content' });
+                await MarkdownRenderer.render(this.app, content, contentEl, file.path, this as unknown as Component);
+            }
         }
 
         const rawChoices = data.edges.filter(edge => edge.fromNode === currentNode.id);
-        
+
         // 1. Pre-parse choices and check for missing variables
         const parsedChoices = rawChoices.map(edge => {
             const parsed = LogicEngine.parseLabel(edge.label || "Next");
@@ -1375,7 +1373,7 @@ export class CanvasPlayerPlugin extends Plugin {
 
         if (missingVars.size > 0) {
             container.createEl('div', { text: 'Please set values for new variables:', cls: 'canvas-player-prompt-header' });
-            
+
             missingVars.forEach(variable => {
                 // Default to false if not set
                 if (this.activeSession!.state[variable] === undefined) {
@@ -1400,7 +1398,7 @@ export class CanvasPlayerPlugin extends Plugin {
                 });
             return;
         }
-        
+
         // 2. Filter choices based on state
         const validChoices = parsedChoices.filter(item => LogicEngine.checkConditions(item.parsed, this.activeSession!.state));
 
@@ -1410,14 +1408,14 @@ export class CanvasPlayerPlugin extends Plugin {
                     .setButtonText("Return to Parent Canvas")
                     .setCta()
                     .onClick(async () => {
-                         // Finish and save timer before returning
-                         await this.finishTimerForActiveSession();
-                         await this.popStackAndReturn();
+                        // Finish and save timer before returning
+                        await this.finishTimerForActiveSession();
+                        await this.popStackAndReturn();
                     })
                     .buttonEl.addClass('mod-cta');
             } else {
                 new ButtonComponent(container)
-                    .setButtonText("End of Path") 
+                    .setButtonText("End of Path")
                     .onClick(async () => {
                         // Finish and save timer before stopping
                         await this.finishTimerForActiveSession();
@@ -1436,7 +1434,7 @@ export class CanvasPlayerPlugin extends Plugin {
                         if (nextNode) {
                             // Finish and save timer for current node
                             await this.finishTimerForActiveSession();
-                            
+
                             // Update state
                             LogicEngine.updateState(choice.parsed, this.activeSession!.state);
 
@@ -1448,18 +1446,18 @@ export class CanvasPlayerPlugin extends Plugin {
 
                             // Update activeSession
                             this.activeSession!.currentNode = nextNode;
-                            
+
                             // Start timer for next node
                             if (this.settings.enableTimeboxing) {
                                 await this.startTimerForActiveSession();
                             }
-                            
+
                             // 1. Move Camera (blur stays active, only focused node will change)
                             this.zoomToNode(view, nextNode);
-                            
+
                             // 2. Render next buttons immediately
                             this.renderChoicesInHud(view, data, nextNode, container);
-                            
+
                             // 3. Update spotlight to new node (smooth transition, no blur gap)
                             // Use requestAnimationFrame for smoother timing, then small delay for zoom to settle
                             requestAnimationFrame(() => {
@@ -1467,7 +1465,7 @@ export class CanvasPlayerPlugin extends Plugin {
                                     await this.applySpotlight(view, nextNode);
                                 }, 300); // Reduced delay - blur stays active, only focused node changes
                             });
-                            
+
                             // 4. Update mini view if open
                             await this.updateAllUIs();
                         }
@@ -1479,23 +1477,23 @@ export class CanvasPlayerPlugin extends Plugin {
 
     async diveIntoCanvas(view: ItemView, currentData: CanvasData, fileNode: CanvasNode) {
         if (!this.activeSession) return;
-        
+
         // Finish and save timer for current file node before diving
         await this.finishTimerForActiveSession();
-        
+
         const filePath = fileNode.file;
         if (!filePath) return;
 
         const targetFile = this.app.metadataCache.getFirstLinkpathDest(filePath, (view as any).file?.path || "");
-        
+
         if (!targetFile || targetFile.extension !== 'canvas') {
-             new Notice(`Could not find canvas file: ${filePath}`);
-             return;
+            new Notice(`Could not find canvas file: ${filePath}`);
+            return;
         }
 
         // 1. Push to stack
         // @ts-ignore
-        const currentFile = view.file; 
+        const currentFile = view.file;
         if (!currentFile) return;
 
         this.activeSession.stack.push({
@@ -1512,7 +1510,7 @@ export class CanvasPlayerPlugin extends Plugin {
         // 3. Open the new file
         const leaf = view.leaf;
         await leaf.openFile(targetFile);
-        
+
         // 4. Get new view and data
         const newView = leaf.view as ItemView;
         this.cameraModeView = newView;
@@ -1521,16 +1519,16 @@ export class CanvasPlayerPlugin extends Plugin {
         const startNode = this.getStartNode(newData);
 
         if (!startNode) {
-             new Notice(`Cannot start embedded canvas: Could not find a text card containing "${this.settings.startText}" that points to a playable node.`);
-             await this.popStackAndReturn();
-             return;
+            new Notice(`Cannot start embedded canvas: Could not find a text card containing "${this.settings.startText}" that points to a playable node.`);
+            await this.popStackAndReturn();
+            return;
         }
 
         // 5. Update activeSession
         this.activeSession.currentCanvasFile = targetFile;
         this.activeSession.currentCanvasData = newData;
         this.activeSession.currentNode = startNode;
-        
+
         // Start timer for new node
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
@@ -1546,17 +1544,17 @@ export class CanvasPlayerPlugin extends Plugin {
                 await this.applySpotlight(newView, startNode);
             }, 300); // Reduced delay - blur stays active
         });
-        
+
         // Update mini view
         await this.updateAllUIs();
     }
 
     async popStackAndReturn() {
         if (!this.activeSession) return;
-        
+
         // Finish and save timer for current node (if any) before returning
         await this.finishTimerForActiveSession();
-        
+
         const frame = this.activeSession.stack.pop();
         if (!frame) {
             await this.stopCameraMode();
@@ -1577,7 +1575,7 @@ export class CanvasPlayerPlugin extends Plugin {
         this.activeSession.currentCanvasData = frame.data;
         this.activeSession.currentNode = frame.currentNode;
         this.activeSession.history = [];
-        
+
         // Start timer for restored node
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
@@ -1585,7 +1583,7 @@ export class CanvasPlayerPlugin extends Plugin {
 
         // Restore HUD at the node we left off (the File node)
         await this.createHud(view, frame.data, frame.currentNode);
-        
+
         // Zoom to that node
         this.zoomToNode(view, frame.currentNode);
         // Clear previous focused node since we're returning to a different canvas
@@ -1595,7 +1593,7 @@ export class CanvasPlayerPlugin extends Plugin {
                 await this.applySpotlight(view, frame.currentNode);
             }, 300); // Reduced delay - blur stays active
         });
-        
+
         // Update mini view
         await this.updateAllUIs();
     }
@@ -1610,21 +1608,21 @@ export class CanvasPlayerPlugin extends Plugin {
             }
             this.currentFocusedNodeEl = null;
         }
-        
+
         // Remove is-focused class from all nodes (fallback cleanup)
         if (view) {
             // Safety check: ensure view and contentEl exist
             if (!view || !view.contentEl) {
                 return;
             }
-            
+
             try {
                 const allFocusedNodes = view.contentEl.querySelectorAll('.canvas-node.is-focused');
                 allFocusedNodes.forEach(node => node.classList.remove('is-focused'));
-                
+
                 // Find canvas wrapper and remove focus mode attribute
-                const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
-                                     view.contentEl.querySelector('.canvas')?.parentElement;
+                const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') ||
+                    view.contentEl.querySelector('.canvas')?.parentElement;
                 if (canvasWrapper) {
                     canvasWrapper.removeAttribute('data-focus-mode-enabled');
                 }
@@ -1639,18 +1637,18 @@ export class CanvasPlayerPlugin extends Plugin {
                         if (!leaf.view || leaf.view.getViewType() !== 'canvas') {
                             return;
                         }
-                        
+
                         const view = leaf.view as ItemView;
                         // Safety check: ensure view and contentEl exist
                         if (!view || !view.contentEl) {
                             return;
                         }
-                        
+
                         const allFocusedNodes = view.contentEl.querySelectorAll('.canvas-node.is-focused');
                         allFocusedNodes.forEach(node => node.classList.remove('is-focused'));
-                        
-                        const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
-                                             view.contentEl.querySelector('.canvas')?.parentElement;
+
+                        const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') ||
+                            view.contentEl.querySelector('.canvas')?.parentElement;
                         if (canvasWrapper) {
                             canvasWrapper.removeAttribute('data-focus-mode-enabled');
                         }
@@ -1682,15 +1680,15 @@ export class CanvasPlayerPlugin extends Plugin {
                 // canvas.nodes is a Map where keys are node IDs
                 // Try both Map.get() method and bracket notation
                 const canvasNode = canvas.nodes.get?.(node.id) || canvas.nodes[node.id];
-                
+
                 if (canvasNode) {
                     // Try common property names for the DOM element reference
-                    const domElement = canvasNode.nodeEl || 
-                                     canvasNode.el || 
-                                     canvasNode.element || 
-                                     canvasNode.domEl ||
-                                     canvasNode.containerEl;
-                    
+                    const domElement = canvasNode.nodeEl ||
+                        canvasNode.el ||
+                        canvasNode.element ||
+                        canvasNode.domEl ||
+                        canvasNode.containerEl;
+
                     if (domElement && domElement instanceof HTMLElement) {
                         console.log(`Canvas Player: Found node ${node.id} via Canvas API`);
                         return domElement;
@@ -1728,12 +1726,12 @@ export class CanvasPlayerPlugin extends Plugin {
                 for (const nodeEl of Array.from(allNodes)) {
                     const el = nodeEl as HTMLElement;
                     // Check various ways the ID might be stored in DOM
-                    const nodeId = el.getAttribute('data-id') || 
-                                  el.getAttribute('data-node-id') ||
-                                  (el as any).dataset?.id ||
-                                  (el as any).dataset?.nodeId ||
-                                  el.id;
-                    
+                    const nodeId = el.getAttribute('data-id') ||
+                        el.getAttribute('data-node-id') ||
+                        (el as any).dataset?.id ||
+                        (el as any).dataset?.nodeId ||
+                        el.id;
+
                     if (nodeId === node.id) {
                         console.log(`Canvas Player: Found node ${node.id} by iterating DOM nodes on attempt ${attempt + 1}`);
                         return el;
@@ -1746,17 +1744,17 @@ export class CanvasPlayerPlugin extends Plugin {
                 const delay = initialDelay * Math.pow(2, attempt);
                 console.log(`Canvas Player: Node ${node.id} not found, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
-                
+
                 // Try Canvas API again after delay (node might have been added to the map)
                 if (canvas && canvas.nodes) {
                     try {
                         const canvasNode = canvas.nodes.get?.(node.id) || canvas.nodes[node.id];
                         if (canvasNode) {
-                            const domElement = canvasNode.nodeEl || 
-                                             canvasNode.el || 
-                                             canvasNode.element || 
-                                             canvasNode.domEl ||
-                                             canvasNode.containerEl;
+                            const domElement = canvasNode.nodeEl ||
+                                canvasNode.el ||
+                                canvasNode.element ||
+                                canvasNode.domEl ||
+                                canvasNode.containerEl;
                             if (domElement && domElement instanceof HTMLElement) {
                                 console.log(`Canvas Player: Found node ${node.id} via Canvas API on retry ${attempt + 1}`);
                                 return domElement;
@@ -1776,9 +1774,9 @@ export class CanvasPlayerPlugin extends Plugin {
     async applySpotlight(view: ItemView, node: CanvasNode) {
         // Find the canvas wrapper element
         // Try .canvas-wrapper first, then fall back to .canvas parent
-        const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') || 
-                             view.contentEl.querySelector('.canvas')?.parentElement;
-        
+        const canvasWrapper = view.contentEl.querySelector('.canvas-wrapper') ||
+            view.contentEl.querySelector('.canvas')?.parentElement;
+
         if (!canvasWrapper) {
             console.warn('Canvas Player: Could not find canvas wrapper element');
             return;
@@ -1789,13 +1787,13 @@ export class CanvasPlayerPlugin extends Plugin {
 
         // Find the current node DOM element using retry logic
         const targetEl = await this.findCanvasNode(view, node);
-        
+
         if (targetEl) {
             // Remove is-focused from previously focused node (if different)
             if (this.currentFocusedNodeEl && this.currentFocusedNodeEl !== targetEl) {
                 this.currentFocusedNodeEl.classList.remove('is-focused');
             }
-            
+
             // Add is-focused class to the current node
             targetEl.classList.add('is-focused');
             this.currentFocusedNodeEl = targetEl;
@@ -1809,8 +1807,8 @@ export class CanvasPlayerPlugin extends Plugin {
 
     zoomToNode(view: any, node: CanvasNode) {
         if (view && view.canvas) {
-            const xPadding = node.width * 0.1; 
-            const yPadding = node.height * 0.1; 
+            const xPadding = node.width * 0.1;
+            const yPadding = node.height * 0.1;
             view.canvas.zoomToBbox({
                 minX: node.x - xPadding,
                 minY: node.y - yPadding,
@@ -1827,17 +1825,17 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     updateStatusBar() {
         if (!this.statusBarItem) return;
-        
+
         if (!this.activeSession) {
             this.statusBarItem.hide();
             return;
         }
-        
+
         if (!this.settings.enableTimeboxing) {
             this.statusBarItem.hide();
             return;
         }
-        
+
         this.statusBarItem.show();
         const remainingMs = this.sharedTimer.getRemainingMs();
         const mode = this.sharedTimer.getMode();
@@ -1850,7 +1848,7 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async minimizePlayer() {
         if (!this.activeSession) return;
-        
+
         // Close modal (but keep session active)
         if (this.activeModal) {
             // Set flag so close() actually closes the modal DOM element
@@ -1858,10 +1856,10 @@ export class CanvasPlayerPlugin extends Plugin {
             this.activeModal.close();
             this.activeModal = null;
         }
-        
+
         // Ensure mini view is open
         await this.ensureMiniViewOpen();
-        
+
         // Refresh mini view to show Restore button
         await this.updateAllUIs();
     }
@@ -1871,7 +1869,7 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async restorePlayer() {
         if (!this.activeSession) return;
-        
+
         const mode = this.activeSessionMode ?? this.settings.mode;
 
         // Check if we're in modal mode or camera mode
@@ -1902,7 +1900,7 @@ export class CanvasPlayerPlugin extends Plugin {
                 await this.startCameraMode(this.activeSession.currentCanvasData, this.activeSession.currentNode);
             }
         }
-        
+
         // Refresh mini view to hide Restore button
         await this.updateAllUIs();
     }
@@ -1912,15 +1910,15 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async minimizeCameraMode() {
         if (!this.activeSession || !this.cameraModeView) return;
-        
+
         // Hide HUD (but keep session active)
         if (this.activeHud) {
             this.activeHud.hide();
         }
-        
+
         // Ensure mini view is open
         await this.ensureMiniViewOpen();
-        
+
         // Refresh mini view to show Restore button
         await this.updateAllUIs();
     }
@@ -1930,7 +1928,7 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async restoreCameraMode() {
         if (!this.activeSession || !this.cameraModeView) return;
-        
+
         // Show HUD again
         if (this.activeHud) {
             this.activeHud.show();
@@ -1942,7 +1940,7 @@ export class CanvasPlayerPlugin extends Plugin {
                 this.activeSession.currentNode
             );
         }
-        
+
         // Restore spotlight on current node
         this.zoomToNode(this.cameraModeView, this.activeSession.currentNode);
         requestAnimationFrame(() => {
@@ -1950,7 +1948,7 @@ export class CanvasPlayerPlugin extends Plugin {
                 await this.applySpotlight(this.cameraModeView!, this.activeSession!.currentNode);
             }, 300);
         });
-        
+
         // Refresh mini view to hide Restore button
         await this.updateAllUIs();
     }
@@ -1960,14 +1958,14 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     isPlayerMinimized(): boolean {
         if (!this.activeSession) return false;
-        
+
         const mode = this.activeSessionMode ?? this.settings.mode;
 
         // Reader mode: minimized if modal is closed
         if (mode === 'modal') {
             return this.activeModal === null;
         }
-        
+
         // Camera mode: minimized if we don't currently have an active camera view,
         // or if the HUD exists but is hidden.
         if (mode === 'camera') {
@@ -1975,7 +1973,7 @@ export class CanvasPlayerPlugin extends Plugin {
             if (!this.activeHud) return true;
             return this.activeHud.offsetParent === null;
         }
-        
+
         return false;
     }
 
@@ -1997,7 +1995,7 @@ export class CanvasPlayerPlugin extends Plugin {
             // Focus existing view
             this.app.workspace.revealLeaf(leaves[0]);
         }
-        
+
         // Refresh mini view
         const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
         if (miniLeaves.length > 0) {
@@ -2024,58 +2022,76 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async stopActiveSession() {
         if (!this.activeSession) return;
-        
+
         // Check ownership before stopping (but allow if we're owner)
         if (!(await this.assertCanControlAsync())) return;
-        
-        // Save resume session before stopping
-        await this.saveResumeSession(this.activeSession.rootCanvasFile.path, {
-            rootFilePath: this.activeSession.rootCanvasFile.path,
-            currentFilePath: this.activeSession.currentCanvasFile.path,
-            currentNodeId: this.activeSession.currentNode.id,
-            currentSessionState: { ...this.activeSession.state },
-            stack: this.activeSession.stack.map(frame => ({
-                filePath: frame.file.path,
-                currentNodeId: frame.currentNode.id,
-                state: { ...frame.state }
-            }))
-        });
-        
-        // Stopping should NOT affect node averages
-        this.abortTimerForActiveSession();
-        
-        // Clean up camera mode if active
-        if (this.cameraModeView) {
-            // Unsubscribe camera mode timer
-            if (this.cameraModeTimerUnsubscribe) {
-                this.cameraModeTimerUnsubscribe();
-                this.cameraModeTimerUnsubscribe = null;
-            }
-            // Remove HUD and spotlight
-            this.activeHud?.remove();
-            this.activeOverlay?.remove();
-            this.removeSpotlight();
-            this.cameraModeView = null;
-        }
-        
-        // Clean up
-        this.sharedTimer.abort();
-        this.activeSession = null;
-        this.activeSessionMode = null;
-        this.activeModal = null;
 
-        // Clear persisted active session state
-        await this.clearActiveSessionState();
-        
-        // Update UI
-        this.updateStatusBar();
-        
-        // Refresh mini view to show empty state
-        const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
-        miniLeaves.forEach(leaf => {
-            const miniView = leaf.view as CanvasPlayerMiniView;
-            miniView.refresh();
-        });
+        // 1. Indicate Busy State with a persistent notice
+        const saveNotice = new Notice("Stopping session... syncing changes...", 0); // 0 duration = persistent
+
+        try {
+            // Save resume session before stopping
+            await this.saveResumeSession(this.activeSession.rootCanvasFile.path, {
+                rootFilePath: this.activeSession.rootCanvasFile.path,
+                currentFilePath: this.activeSession.currentCanvasFile.path,
+                currentNodeId: this.activeSession.currentNode.id,
+                currentSessionState: { ...this.activeSession.state },
+                stack: this.activeSession.stack.map(frame => ({
+                    filePath: frame.file.path,
+                    currentNodeId: frame.currentNode.id,
+                    state: { ...frame.state }
+                }))
+            });
+
+            // Stopping should NOT affect node averages
+            this.abortTimerForActiveSession();
+
+            // Clean up camera mode if active
+            if (this.cameraModeView) {
+                // Unsubscribe camera mode timer
+                if (this.cameraModeTimerUnsubscribe) {
+                    this.cameraModeTimerUnsubscribe();
+                    this.cameraModeTimerUnsubscribe = null;
+                }
+                // Remove HUD and spotlight
+                this.activeHud?.remove();
+                this.activeOverlay?.remove();
+                this.removeSpotlight();
+                this.cameraModeView = null;
+            }
+
+            // Clean up
+            this.sharedTimer.abort();
+            this.activeSession = null;
+            this.activeSessionMode = null;
+            this.activeModal = null;
+
+            // Clear persisted active session state
+            await this.clearActiveSessionState();
+
+            // 2. Small buffer to allow FS flush/Sync pickup
+            // This ensures the write hits the disk before we tell the user it's safe to exit
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Update UI
+            this.updateStatusBar();
+
+            // Refresh mini view to show empty state
+            const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
+            miniLeaves.forEach(leaf => {
+                const miniView = leaf.view as CanvasPlayerMiniView;
+                miniView.refresh();
+            });
+
+            // 3. Clear busy state
+            saveNotice.hide();
+            new Notice("Session stopped.");
+
+        } catch (e) {
+            saveNotice.hide();
+            console.error(e);
+            new Notice("Error stopping session.");
+        }
     }
 
     /**
@@ -2083,24 +2099,24 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async navigateBack() {
         if (!this.activeSession || this.activeSession.history.length === 0) return;
-        
+
         // Check ownership before navigation
         if (!(await this.assertCanControlAsync())) return;
-        
+
         const previousNode = this.activeSession.history.pop();
         if (!previousNode) return;
-        
+
         // Going Back should NOT affect node averages
         this.abortTimerForActiveSession();
-        
+
         // Update session
         this.activeSession.currentNode = previousNode;
-        
+
         // Start timer for previous node
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
         }
-        
+
         // Update UI
         await this.updateAllUIs();
     }
@@ -2110,35 +2126,35 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async navigateToNode(parsedChoice: any, nextNode: CanvasNode) {
         if (!this.activeSession) return;
-        
+
         // Check ownership before navigation
         if (!(await this.assertCanControlAsync())) return;
-        
+
         // Finish timer for current node
         if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
             await this.finishTimerForActiveSession();
         }
-        
+
         // Update state
         LogicEngine.updateState(parsedChoice, this.activeSession.state);
-        
+
         // Push current node to history
         this.activeSession.history.push(this.activeSession.currentNode);
-        
+
         // Check if next node is a canvas file (dive into nested canvas)
         if (nextNode.type === 'file' && nextNode.file && nextNode.file.endsWith('.canvas')) {
             await this.diveIntoCanvasForSession(nextNode);
             return;
         }
-        
+
         // Update to next node
         this.activeSession.currentNode = nextNode;
-        
+
         // Start timer for next node
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
         }
-        
+
         // Update UI
         await this.updateAllUIs();
     }
@@ -2151,33 +2167,33 @@ export class CanvasPlayerPlugin extends Plugin {
             await this.stopActiveSession();
             return;
         }
-        
+
         // Check ownership before navigation
         if (!(await this.assertCanControlAsync())) return;
-        
+
         // Finish timer for current node
         if (this.settings.enableTimeboxing && this.sharedTimer.isRunning()) {
             await this.finishTimerForActiveSession();
         }
-        
+
         const frame = this.activeSession.stack.pop();
         if (!frame) {
             await this.stopActiveSession();
             return;
         }
-        
+
         // Restore parent context
         this.activeSession.currentCanvasFile = frame.file;
         this.activeSession.currentCanvasData = frame.data;
         this.activeSession.currentNode = frame.currentNode;
         this.activeSession.state = frame.state;
         this.activeSession.history = [];
-        
+
         // Start timer for restored node
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
         }
-        
+
         // Update UI
         await this.updateAllUIs();
     }
@@ -2187,20 +2203,20 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     private async diveIntoCanvasForSession(fileNode: CanvasNode) {
         if (!this.activeSession) return;
-        
+
         const filePath = fileNode.file;
         if (!filePath) return;
-        
+
         const targetFile = this.app.metadataCache.getFirstLinkpathDest(
             filePath,
             this.activeSession.currentCanvasFile.path
         );
-        
+
         if (!targetFile || targetFile.extension !== 'canvas') {
             new Notice(`Could not find canvas file: ${filePath}`);
             return;
         }
-        
+
         // Push to stack
         this.activeSession.stack.push({
             file: this.activeSession.currentCanvasFile,
@@ -2208,30 +2224,30 @@ export class CanvasPlayerPlugin extends Plugin {
             currentNode: fileNode,
             state: { ...this.activeSession.state }
         });
-        
+
         // Reset state for isolated scope
         this.activeSession.state = {};
-        
+
         // Load new canvas
         this.activeSession.currentCanvasFile = targetFile;
         const content = await this.app.vault.read(targetFile);
         this.activeSession.currentCanvasData = JSON.parse(content);
-        
+
         const startNode = this.getStartNode(this.activeSession.currentCanvasData);
         if (!startNode) {
             new Notice(`Cannot start embedded canvas: Could not find a text card containing "${this.settings.startText}" that points to a playable node.`);
             await this.navigateReturnToParent();
             return;
         }
-        
+
         this.activeSession.currentNode = startNode;
         this.activeSession.history = [];
-        
+
         // Start timer for new node
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
         }
-        
+
         // Update UI
         await this.updateAllUIs();
     }
@@ -2242,14 +2258,14 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     private async startTimerForActiveSession() {
         if (!this.activeSession || !this.settings.enableTimeboxing) return;
-        
+
         const timingData = await loadTimingForNode(
             this.app,
             this.activeSession.currentCanvasFile,
             this.activeSession.currentNode,
             this.activeSession.currentCanvasData
         );
-        
+
         if (timingData && timingData.avgMs > 0) {
             // Node has learned average: countdown mode
             const durationMs = timingData.avgMs;
@@ -2262,7 +2278,7 @@ export class CanvasPlayerPlugin extends Plugin {
             this.activeSession.timerStartTimeMs = Date.now();
             this.sharedTimer.start(0, 'countup');
         }
-        
+
         this.updateStatusBar();
 
         // Persist state after timer starts/restarts
@@ -2277,9 +2293,9 @@ export class CanvasPlayerPlugin extends Plugin {
         if (!this.activeSession || !this.settings.enableTimeboxing || !this.sharedTimer.isRunning()) {
             return;
         }
-        
+
         const elapsedMs = this.sharedTimer.finish();
-        
+
         // Load existing timing or start fresh
         const existingTiming = await loadTimingForNode(
             this.app,
@@ -2287,10 +2303,10 @@ export class CanvasPlayerPlugin extends Plugin {
             this.activeSession.currentNode,
             this.activeSession.currentCanvasData
         );
-        
+
         // Update timing using robust average
         const newTiming = updateRobustAverage(existingTiming, elapsedMs);
-        
+
         // Award points only if this is NOT the first completion (calibration)
         if (existingTiming && existingTiming.avgMs > 0) {
             const points = calculatePoints(elapsedMs, existingTiming.avgMs);
@@ -2307,7 +2323,7 @@ export class CanvasPlayerPlugin extends Plugin {
             // First completion: calibration only, no points
             // (Silent - user just learned the baseline)
         }
-        
+
         // Save timing back
         const canvasNeedsSave = await saveTimingForNode(
             this.app,
@@ -2316,7 +2332,7 @@ export class CanvasPlayerPlugin extends Plugin {
             this.activeSession.currentCanvasData,
             newTiming
         );
-        
+
         if (canvasNeedsSave) {
             const content = JSON.stringify(this.activeSession.currentCanvasData, null, 2);
             await this.app.vault.modify(this.activeSession.currentCanvasFile, content);
@@ -2341,14 +2357,14 @@ export class CanvasPlayerPlugin extends Plugin {
         if (this.activeModal) {
             await this.activeModal.refreshScene();
         }
-        
+
         // Update mini view
         const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
         miniLeaves.forEach(leaf => {
             const miniView = leaf.view as CanvasPlayerMiniView;
             miniView.refresh();
         });
-        
+
         // Update status bar
         this.updateStatusBar();
     }
@@ -2385,7 +2401,7 @@ class ConfirmResetTimeboxingModal extends Modal {
         });
 
         const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
-        
+
         new ButtonComponent(buttonContainer)
             .setButtonText('Cancel')
             .onClick(() => this.close());
@@ -2405,7 +2421,7 @@ class ConfirmResetTimeboxingModal extends Modal {
                     if (result.markdownFileCount > 0) {
                         parts.push(`${result.markdownFileCount} markdown file${result.markdownFileCount !== 1 ? 's' : ''} updated`);
                     }
-                    const message = parts.length > 0 
+                    const message = parts.length > 0
                         ? `Reset timeboxing stats: ${parts.join(' and ')}.`
                         : 'Reset timeboxing stats.';
                     new Notice(message);
@@ -2476,8 +2492,8 @@ class CanvasPlayerSettingTab extends PluginSettingTab {
         });
 
         containerEl.createEl('h2', { text: 'Start Node Requirement' });
-        containerEl.createEl('p', { 
-            text: `Your canvas must have a text card containing the start text (e.g., "${this.plugin.settings.startText}"). This card should point to the actual first playable node. The marker card itself will be skipped during playback.` 
+        containerEl.createEl('p', {
+            text: `Your canvas must have a text card containing the start text (e.g., "${this.plugin.settings.startText}"). This card should point to the actual first playable node. The marker card itself will be skipped during playback.`
         });
     }
 
@@ -2496,7 +2512,7 @@ class CanvasPlayerModal extends Modal {
         // Note: activeSession is created by plugin.playCanvasFromNode before opening modal
     }
 
-    async onOpen() { 
+    async onOpen() {
         await this.renderScene();
         // Subscribe to timer updates if timeboxing is enabled (timerEl is set in renderScene)
         if (this.plugin.settings.enableTimeboxing && this.timerEl) {
@@ -2504,7 +2520,7 @@ class CanvasPlayerModal extends Modal {
                 this.updateTimerDisplay(remainingMs);
             });
         }
-        
+
         // Intercept backdrop clicks to minimize instead of close
         // Obsidian modals close when clicking outside the modal content
         // We intercept this by overriding close(), but we can also prevent the click event
@@ -2514,7 +2530,7 @@ class CanvasPlayerModal extends Modal {
             modalContainer.addEventListener('click', (evt) => {
                 const target = evt.target as HTMLElement;
                 // If click is on backdrop or container (not on modal content), minimize
-                if ((target === modalContainer || target.classList.contains('modal-backdrop')) && 
+                if ((target === modalContainer || target.classList.contains('modal-backdrop')) &&
                     !this.modalEl.contains(target)) {
                     evt.preventDefault();
                     evt.stopPropagation();
@@ -2522,7 +2538,7 @@ class CanvasPlayerModal extends Modal {
                 }
             }, true); // Use capture phase to intercept before default handler
         }
-        
+
         // Intercept X button clicks to minimize instead of close
         const closeButton = this.modalEl.querySelector('.modal-close-button');
         if (closeButton) {
@@ -2533,7 +2549,7 @@ class CanvasPlayerModal extends Modal {
             });
         }
     }
-    
+
     // Override close() to minimize instead of closing (unless shouldActuallyClose is true)
     close() {
         if (this.shouldActuallyClose || this.isMinimizing) {
@@ -2550,14 +2566,14 @@ class CanvasPlayerModal extends Modal {
             super.close();
         }
     }
-    
-    async onClose() { 
+
+    async onClose() {
         // Unsubscribe from timer
         if (this.timerUnsubscribe) {
             this.timerUnsubscribe();
             this.timerUnsubscribe = null;
         }
-        
+
         // Clear modal reference
         // Note: We don't save resume session here because:
         // - If minimizing: minimizePlayer() doesn't clear activeSession, so we don't save here
@@ -2566,10 +2582,10 @@ class CanvasPlayerModal extends Modal {
         if (this.plugin.activeModal === this) {
             this.plugin.activeModal = null;
         }
-        
-        this.contentEl.empty(); 
+
+        this.contentEl.empty();
     }
-    
+
     private updateTimerDisplay(remainingMs: number) {
         if (!this.timerEl) return;
         const mode = this.plugin.sharedTimer.getMode();
@@ -2582,7 +2598,7 @@ class CanvasPlayerModal extends Modal {
             this.timerEl.removeClass('canvas-player-timer-negative');
         }
     }
-    
+
     async refreshScene() {
         await this.renderScene();
         // Re-subscribe to timer
@@ -2602,13 +2618,13 @@ class CanvasPlayerModal extends Modal {
             this.close();
             return;
         }
-        
+
         const { contentEl } = this;
         contentEl.empty();
         const container = contentEl.createDiv({ cls: 'canvas-player-container' });
         const controls = container.createDiv({ cls: 'canvas-player-controls' });
         const textContainer = container.createDiv({ cls: 'canvas-player-text' });
-        
+
         new ButtonComponent(controls)
             .setButtonText('Back')
             .setDisabled(session.history.length === 0)
@@ -2621,14 +2637,14 @@ class CanvasPlayerModal extends Modal {
             .onClick(() => {
                 void this.openNodeForEditing();
             });
-        
+
         // Minimize button
         new ButtonComponent(controls)
             .setButtonText('Minimize')
             .onClick(async () => {
                 await this.plugin.minimizePlayer();
             });
-        
+
         // Stop button
         new ButtonComponent(controls)
             .setButtonText('Stop')
@@ -2638,7 +2654,7 @@ class CanvasPlayerModal extends Modal {
                 await this.plugin.stopActiveSession();
                 this.close();
             });
-        
+
         // Timer display (top-right) - created after buttons so it appears on the right, only if enabled
         this.timerEl = null;
         if (this.plugin.settings.enableTimeboxing) {
@@ -2652,7 +2668,7 @@ class CanvasPlayerModal extends Modal {
             const file = this.app.metadataCache.getFirstLinkpathDest(session.currentNode.file, session.currentCanvasFile.path);
             if (file instanceof TFile) {
                 if (file.extension !== 'canvas') {
-                     // Markdown files
+                    // Markdown files
                     const content = await this.app.vault.read(file);
                     await MarkdownRenderer.render(
                         this.app,
@@ -2679,7 +2695,7 @@ class CanvasPlayerModal extends Modal {
         }
 
         const rawChoices = session.currentCanvasData.edges.filter(edge => edge.fromNode === session.currentNode.id);
-        
+
         // 1. Pre-parse and check for missing variables
         const parsedChoices = rawChoices.map(edge => {
             const parsed = LogicEngine.parseLabel(edge.label || "Next");
@@ -2726,7 +2742,7 @@ class CanvasPlayerModal extends Modal {
                     .setButtonText("Return to Parent Canvas")
                     .setCta()
                     .onClick(async () => {
-                         await this.plugin.navigateReturnToParent();
+                        await this.plugin.navigateReturnToParent();
                     })
                     .buttonEl.addClass('mod-cta');
             } else {
@@ -2752,7 +2768,7 @@ class CanvasPlayerModal extends Modal {
     private async openNodeForEditing() {
         const session = this.plugin.activeSession;
         if (!session) return;
-        
+
         this.close();
         const leaf = this.app.workspace.getLeaf(false) ?? this.app.workspace.getLeaf(true);
         if (!leaf) return;
