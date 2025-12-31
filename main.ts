@@ -1,4 +1,4 @@
-import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu, debounce, WorkspaceLeaf } from 'obsidian';
+import { App, Modal, Plugin, Notice, MarkdownRenderer, ButtonComponent, PluginSettingTab, Setting, ItemView, Component, TFile, Menu, debounce, WorkspaceLeaf, TAbstractFile } from 'obsidian';
 import { LogicEngine, GameState } from './logic';
 import { CanvasNode, CanvasData, StackFrame } from './types';
 import { CanvasPlayerSettings, DEFAULT_SETTINGS } from './settings';
@@ -58,6 +58,56 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     getDeviceId(): string {
         return this.deviceId;
+    }
+
+    /**
+     * Get the TFile for the active session state in the vault root.
+     * We use a vault file because creation/deletion syncs faster than data.json modification.
+     */
+    private getSessionStateFile(): TFile | null {
+        const file = this.app.vault.getAbstractFileByPath("canvas-session-state.json");
+        return file instanceof TFile ? file : null;
+    }
+
+    /**
+     * Get the file used to store resume data in the vault.
+     */
+    private getResumeDataFile(): TFile | null {
+        const file = this.app.vault.getAbstractFileByPath("canvas-player-resume-data.json");
+        return file instanceof TFile ? file : null;
+    }
+
+    /**
+     * Load all resume sessions from the vault file.
+     */
+    private async loadResumeDataFromVault(): Promise<Record<string, ResumeSession>> {
+        const file = this.getResumeDataFile();
+        if (!file) return {};
+        try {
+            const content = await this.app.vault.read(file);
+            return JSON.parse(content);
+        } catch (e) {
+            console.error("Canvas Player: Failed to load resume data", e);
+            return {};
+        }
+    }
+
+    /**
+     * Save all resume sessions to the vault file.
+     */
+    private async saveResumeDataToVault(data: Record<string, ResumeSession>): Promise<void> {
+        const file = this.getResumeDataFile();
+        const content = JSON.stringify(data, null, 2);
+        
+        try {
+            if (file) {
+                await this.app.vault.modify(file, content);
+            } else {
+                await this.app.vault.create("canvas-player-resume-data.json", content);
+            }
+        } catch (e) {
+            console.error("Canvas Player: Failed to save resume data", e);
+        }
     }
 
     // Track last applied activeSessionState timestamp to avoid redundant reloads
@@ -368,103 +418,23 @@ export class CanvasPlayerPlugin extends Plugin {
         return targetNode || null;
     }
 
+
     async loadPluginData(): Promise<void> {
         const rawData = await this.loadData();
+        
+        // Initialize default structure
+        const pluginData: PluginData = rawData as PluginData || {
+            settings: DEFAULT_SETTINGS,
+            resumeSessions: {},
+            economy: DEFAULT_ECONOMY_DATA
+        };
 
-        // Migration: if data is flat (old format), wrap it
-        if (rawData && !rawData.settings && !rawData.resumeSessions) {
-            // Old format: data is directly the settings object
-            const pluginData: PluginData = {
-                settings: rawData,
-                resumeSessions: {},
-                economy: DEFAULT_ECONOMY_DATA
-            };
-            this.settings = Object.assign({}, DEFAULT_SETTINGS, pluginData.settings);
-            this.economy = pluginData.economy || { ...DEFAULT_ECONOMY_DATA };
-            // Migrate: save new format
-            await this.saveData(pluginData);
-        } else {
-            // New format: has settings and resumeSessions
-            const pluginData = rawData as PluginData;
-            this.settings = Object.assign({}, DEFAULT_SETTINGS, pluginData?.settings || {});
-            this.economy = pluginData?.economy || { ...DEFAULT_ECONOMY_DATA };
-
-            // Ensure resumeSessions exists
-            if (!pluginData?.resumeSessions || !pluginData?.economy) {
-                const updatedData: PluginData = {
-                    settings: this.settings,
-                    resumeSessions: pluginData?.resumeSessions || {},
-                    activeSessionState: pluginData?.activeSessionState,
-                    economy: this.economy
-                };
-                await this.saveData(updatedData);
-            } else {
-                // Prune stale resume sessions (cheap checks only)
-                const pruneResult = this.pruneResumeSessionsCheap(pluginData);
-                if (pruneResult.pruned > 0) {
-                    const cleanedData: PluginData = {
-                        settings: this.settings,
-                        resumeSessions: pruneResult.updatedResumeSessions,
-                        activeSessionState: pluginData.activeSessionState,
-                        economy: this.economy
-                    };
-                    await this.saveData(cleanedData);
-                    console.log(`Canvas Player: Pruned ${pruneResult.pruned} stale resume session(s), kept ${pruneResult.kept}`);
-                }
-            }
-        }
-
-        // Clean up any old complexity-related settings that might exist
-        if ('showComplexityScore' in this.settings) {
-            delete (this.settings as any).showComplexityScore;
-        }
-        if ('complexityWeights' in this.settings) {
-            delete (this.settings as any).complexityWeights;
-        }
-    }
-
-    /**
-     * Prune stale resume sessions using cheap checks (file existence only).
-     * Does not validate node IDs or read canvas contents.
-     * @returns Pruning statistics and filtered resume sessions
-     */
-    private pruneResumeSessionsCheap(pluginData: PluginData): {
-        pruned: number;
-        kept: number;
-        updatedResumeSessions: Record<string, ResumeSession>;
-    } {
-        const resumeSessions = pluginData.resumeSessions || {};
-        const filtered: Record<string, ResumeSession> = {};
-        let pruned = 0;
-        let kept = 0;
-
-        for (const [key, session] of Object.entries(resumeSessions)) {
-            // Check if key matches rootFilePath (corruption/mismatch check)
-            if (key !== session.rootFilePath) {
-                pruned++;
-                continue;
-            }
-
-            // Check if root file exists and is a canvas
-            const rootFile = this.app.vault.getAbstractFileByPath(session.rootFilePath);
-            if (!(rootFile instanceof TFile) || rootFile.extension !== 'canvas') {
-                pruned++;
-                continue;
-            }
-
-            // Check if current file exists and is a canvas
-            const currentFile = this.app.vault.getAbstractFileByPath(session.currentFilePath);
-            if (!(currentFile instanceof TFile) || currentFile.extension !== 'canvas') {
-                pruned++;
-                continue;
-            }
-
-            // Session passed all cheap checks - keep it
-            filtered[key] = session;
-            kept++;
-        }
-
-        return { pruned, kept, updatedResumeSessions: filtered };
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, pluginData.settings || {});
+        this.economy = pluginData.economy || { ...DEFAULT_ECONOMY_DATA };
+        
+        // Clean up legacy settings
+        if ('showComplexityScore' in this.settings) delete (this.settings as any).showComplexityScore;
+        if ('complexityWeights' in this.settings) delete (this.settings as any).complexityWeights;
     }
 
     async savePluginData(): Promise<void> {
@@ -482,63 +452,58 @@ export class CanvasPlayerPlugin extends Plugin {
     }
 
     async saveResumeSession(rootFilePath: string, session: ResumeSession): Promise<void> {
-        const currentData = (await this.loadData()) as PluginData | null;
-        const pluginData: PluginData = {
-            settings: this.settings,
-            resumeSessions: { ...(currentData?.resumeSessions || {}), [rootFilePath]: session },
-            activeSessionState: currentData?.activeSessionState,
-            economy: currentData?.economy ?? this.economy
-        };
-        await this.saveData(pluginData);
+        // Load latest from vault (to preserve other canvases' resume data)
+        const currentSessions = await this.loadResumeDataFromVault();
+        
+        // Update specific session
+        currentSessions[rootFilePath] = session;
+        
+        // Save back to vault
+        await this.saveResumeDataToVault(currentSessions);
     }
 
     async getResumeSession(rootFilePath: string): Promise<ResumeSession | null> {
-        const currentData = (await this.loadData()) as PluginData | null;
-        return currentData?.resumeSessions?.[rootFilePath] || null;
+        // Read directly from vault file for freshest data
+        const currentSessions = await this.loadResumeDataFromVault();
+        return currentSessions[rootFilePath] || null;
     }
 
     async clearResumeSession(rootFilePath: string): Promise<void> {
-        const currentData = (await this.loadData()) as PluginData | null;
-        if (!currentData?.resumeSessions) return;
-
-        const { [rootFilePath]: _, ...remainingSessions } = currentData.resumeSessions;
-        const pluginData: PluginData = {
-            settings: this.settings,
-            resumeSessions: remainingSessions,
-            activeSessionState: currentData?.activeSessionState,
-            economy: currentData?.economy ?? this.economy
-        };
-        await this.saveData(pluginData);
+        const currentSessions = await this.loadResumeDataFromVault();
+        
+        if (rootFilePath in currentSessions) {
+            const { [rootFilePath]: _, ...remainingSessions } = currentSessions;
+            await this.saveResumeDataToVault(remainingSessions);
+        }
     }
 
     /**
-     * Save the current active session state for timer persistence across restart.
-     * Only persists when timeboxing is enabled.
-     * Enforces single-writer: only the owner device can write (unless creating new session or after takeover).
+     * Save the current active session state to a vault file.
+     * Uses file creation/modification for faster sync signaling.
      */
     private async saveActiveSessionState(forceOwnership: boolean = false): Promise<void> {
-        const currentData = (await this.loadData()) as PluginData | null;
-
+        // If timeboxing disabled or no session, ensure file is gone
         if (!this.settings.enableTimeboxing || !this.activeSession || !this.activeSessionMode) {
-            // Clear persisted state if it exists (only if we're the owner)
-            if (currentData?.activeSessionState) {
-                if (this.isOwnerOfPersistedSession(currentData.activeSessionState) || forceOwnership) {
-                    const pluginData: PluginData = {
-                        settings: this.settings,
-                        resumeSessions: currentData?.resumeSessions || {},
-                        activeSessionState: undefined,
-                        economy: currentData?.economy ?? this.economy
-                    };
-                    await this.saveData(pluginData);
-                }
-            }
+            await this.clearActiveSessionState();
             return;
         }
 
-        // Check ownership: if there's an existing session, we must be the owner (unless forceOwnership)
-        if (currentData?.activeSessionState && !forceOwnership) {
-            if (!this.isOwnerOfPersistedSession(currentData.activeSessionState)) {
-                // Not the owner - don't write
+        const file = this.getSessionStateFile();
+        let currentPersisted: PersistedActiveSession | null = null;
+        
+        // Read existing state to check ownership
+        if (file) {
+            try {
+                const content = await this.app.vault.read(file);
+                currentPersisted = JSON.parse(content);
+            } catch (e) {
+                // Ignore read errors
+            }
+        }
+
+        // Check ownership
+        if (currentPersisted && !forceOwnership) {
+            if (!this.isOwnerOfPersistedSession(currentPersisted)) {
                 console.log('Canvas Player: Cannot save session state - not the owner device');
                 return;
             }
@@ -559,52 +524,68 @@ export class CanvasPlayerPlugin extends Plugin {
             historyNodeIds: this.activeSession.history.map(n => n.id),
             timerStartTimeMs: this.activeSession.timerStartTimeMs ?? now,
             timerDurationMs: this.activeSession.timerDurationMs,
-            ownerDeviceId: forceOwnership ? this.deviceId : (currentData?.activeSessionState?.ownerDeviceId || this.deviceId),
+            ownerDeviceId: forceOwnership ? this.deviceId : (currentPersisted?.ownerDeviceId || this.deviceId),
             updatedAtMs: now,
             updatedByDeviceId: this.deviceId
         };
 
-        const pluginData: PluginData = {
-            settings: this.settings,
-            resumeSessions: currentData?.resumeSessions || {},
-            activeSessionState: persisted,
-            economy: currentData?.economy ?? this.economy
-        };
-        await this.saveData(pluginData);
+        const jsonContent = JSON.stringify(persisted, null, 2);
 
-        // Update last applied timestamp to avoid reloading our own writes
-        this.lastAppliedSessionStateTimestamp = now;
+        // Write to vault file
+        try {
+            if (file) {
+                await this.app.vault.modify(file, jsonContent);
+            } else {
+                await this.app.vault.create("canvas-session-state.json", jsonContent);
+            }
+            this.lastAppliedSessionStateTimestamp = now;
+        } catch (e) {
+            console.error("Canvas Player: Failed to write session file", e);
+        }
     }
 
     private async clearActiveSessionState(): Promise<void> {
-        const currentData = (await this.loadData()) as PluginData | null;
-        if (!currentData?.activeSessionState) return;
+        const file = this.getSessionStateFile();
+        if (!file) return;
 
-        // Only clear if we're the owner
-        if (!this.isOwnerOfPersistedSession(currentData.activeSessionState)) {
-            console.log('Canvas Player: Cannot clear session state - not the owner device');
-            return;
+        try {
+            // Check ownership before deleting
+            const content = await this.app.vault.read(file);
+            const currentPersisted = JSON.parse(content) as PersistedActiveSession;
+            
+            if (!this.isOwnerOfPersistedSession(currentPersisted)) {
+                console.log('Canvas Player: Cannot clear session state - not the owner device');
+                return;
+            }
+            
+            // DELETE the file - this propagates instantly via Obsidian Sync
+            await this.app.vault.delete(file);
+        } catch (e) {
+            console.warn("Canvas Player: Failed to clear session file", e);
         }
-
-        const pluginData: PluginData = {
-            settings: this.settings,
-            resumeSessions: currentData?.resumeSessions || {},
-            activeSessionState: undefined,
-            economy: currentData?.economy ?? this.economy
-        };
-        await this.saveData(pluginData);
     }
 
     /**
-     * Restore active session state from persistent storage, if present.
+     * Restore active session state from the vault file.
      * Restores timer as running while the app was closed and opens mini view.
      * Does not automatically open modal/HUD (treated as minimized by default).
      */
     private async restoreActiveSessionState(): Promise<boolean> {
-        const currentData = (await this.loadData()) as PluginData | null;
-        const persisted = currentData?.activeSessionState;
-        if (!persisted) return false;
         if (!this.settings.enableTimeboxing) return false;
+
+        const file = this.getSessionStateFile();
+        if (!file) return false;
+
+        let persisted: PersistedActiveSession | null = null;
+        try {
+            const content = await this.app.vault.read(file);
+            persisted = JSON.parse(content);
+        } catch (e) {
+            console.error("Canvas Player: Failed to read active session file", e);
+            return false;
+        }
+
+        if (!persisted) return false;
 
         try {
             const rootFile = this.app.vault.getAbstractFileByPath(persisted.rootFilePath);
@@ -644,37 +625,17 @@ export class CanvasPlayerPlugin extends Plugin {
             };
             this.activeSessionMode = persisted.mode;
 
-            // Handle backward compatibility: if ownership fields are missing, assume we're the owner
-            // and update the persisted state
+            // Handle legacy ownership
             if (!persisted.ownerDeviceId) {
-                // Legacy session without ownership - take ownership and update
-                const now = Date.now();
-                const updatedPersisted: PersistedActiveSession = {
-                    ...persisted,
-                    ownerDeviceId: this.deviceId,
-                    updatedAtMs: now,
-                    updatedByDeviceId: this.deviceId
-                };
-                const currentData = (await this.loadData()) as PluginData | null;
-                const pluginData: PluginData = {
-                    settings: this.settings,
-                    resumeSessions: currentData?.resumeSessions || {},
-                    activeSessionState: updatedPersisted,
-                    economy: currentData?.economy ?? this.economy
-                };
-                await this.saveData(pluginData);
-                this.lastAppliedSessionStateTimestamp = now;
+                 this.lastAppliedSessionStateTimestamp = Date.now();
             } else {
                 this.lastAppliedSessionStateTimestamp = persisted.updatedAtMs || Date.now();
             }
 
-            // Restore running timer (wall-clock based)
-            // Default to countdown mode for restored timers (they would have had timing data)
-            // TODO: Store mode in persisted state for future compatibility
+            // Restore running timer
             const mode: 'countdown' | 'countup' = persisted.timerDurationMs > 0 ? 'countdown' : 'countup';
             this.sharedTimer.restoreFromPersisted(persisted.timerStartTimeMs, persisted.timerDurationMs, mode);
 
-            // Update status bar and show mini view
             this.updateStatusBar();
             await this.ensureMiniViewOpen();
             await this.updateAllUIs();
@@ -682,8 +643,7 @@ export class CanvasPlayerPlugin extends Plugin {
             return true;
         } catch (e) {
             console.error('Canvas Player: failed to restore active session state', e);
-            new Notice('Canvas Player: Could not restore timer session. Clearing saved state.');
-            await this.clearActiveSessionState();
+            new Notice('Canvas Player: Could not restore timer session.');
             return false;
         }
     }
@@ -702,17 +662,22 @@ export class CanvasPlayerPlugin extends Plugin {
 
     /**
      * Public method to check if this device is the owner of the current session.
-     * Used by UI components.
+     * Used by UI components to decide whether to show "Take Over" button.
      */
     async isOwnerOfCurrentSession(): Promise<boolean> {
         if (!this.activeSession) return true; // No session = can be owner
+        
+        const file = this.getSessionStateFile();
+        if (!file) return true; // No persisted state file = we can be owner (local only)
 
-        const currentData = (await this.loadData()) as PluginData | null;
-        const persisted = currentData?.activeSessionState;
-
-        if (!persisted) return true; // No persisted state = we can be owner
-
-        return this.isOwnerOfPersistedSession(persisted);
+        try {
+            const content = await this.app.vault.read(file);
+            const persisted = JSON.parse(content) as PersistedActiveSession;
+            return this.isOwnerOfPersistedSession(persisted);
+        } catch (e) {
+            console.error("Canvas Player: Failed to read session file for ownership check", e);
+            return true; // Default to allowing control on error to prevent lockout
+        }
     }
 
     /**
@@ -735,16 +700,22 @@ export class CanvasPlayerPlugin extends Plugin {
      * @returns true if can control, false if readonly
      */
     private async assertCanControlAsync(): Promise<boolean> {
-        if (!this.activeSession) return true; // No session = can control (will create new)
+        if (!this.activeSession) return true; 
 
-        const currentData = (await this.loadData()) as PluginData | null;
-        const persisted = currentData?.activeSessionState;
-
-        if (persisted && !this.isOwnerOfPersistedSession(persisted)) {
-            new Notice('Canvas Player: Session is read-only. Click "Take over" to control it.');
-            return false;
+        const file = this.getSessionStateFile();
+        if (file) {
+            try {
+                const content = await this.app.vault.read(file);
+                const persisted = JSON.parse(content) as PersistedActiveSession;
+                
+                if (!this.isOwnerOfPersistedSession(persisted)) {
+                    new Notice('Canvas Player: Session is read-only. Click "Take over" to control it.');
+                    return false;
+                }
+            } catch (e) {
+                // error reading
+            }
         }
-
         return true;
     }
 
@@ -767,58 +738,60 @@ export class CanvasPlayerPlugin extends Plugin {
     }
 
     /**
-     * Set up reactive sync watcher to detect when data.json changes via Obsidian Sync.
+     * Set up reactive sync watcher to detect when vault file changes via Obsidian Sync.
      */
     private setupReactiveSyncWatcher(): void {
-        // Debounce reloads to avoid double-firing
         this.debouncedReloadSessionState = debounce(async () => {
             await this.reloadSessionStateIfNewer();
         }, 300, true);
 
-        // Watch for vault file modifications
-        // The plugin data file is at: .obsidian/plugins/{pluginId}/data.json
-        const dataPath = `${this.app.vault.configDir}/plugins/${this.manifest.id}/data.json`;
+        // Watch for changes to our specific session file
+        const sessionFileName = "canvas-session-state.json";
 
-        this.registerEvent(
-            this.app.vault.on('modify', (file) => {
-                // Check if this is our plugin data file
-                if (file.path === dataPath) {
-                    // Debounced reload
-                    if (this.debouncedReloadSessionState) {
-                        this.debouncedReloadSessionState();
-                    }
-                }
-            })
-        );
+        const handleFileChange = (file: TAbstractFile) => {
+            if (file.path === sessionFileName) {
+                if (this.debouncedReloadSessionState) this.debouncedReloadSessionState();
+            }
+        };
 
-        // Optional: Lightweight polling fallback (every 2 seconds) in case file events don't fire reliably.
-        // Important: also detect remote clears (persisted session disappearing).
+        this.registerEvent(this.app.vault.on('modify', handleFileChange));
+        this.registerEvent(this.app.vault.on('delete', handleFileChange));
+        this.registerEvent(this.app.vault.on('create', handleFileChange));
+
+        // Keep polling as backup
         this.registerInterval(window.setInterval(async () => {
             if (!this.settings.enableTimeboxing) return;
-
-            // Always check: we need to react both to updates and to remote clears.
             await this.reloadSessionStateIfNewer();
         }, 2000));
     }
 
     /**
-     * Reload and apply session state if a newer version exists.
+     * Reload and apply session state if a newer version exists (or if file was deleted).
      */
     private async reloadSessionStateIfNewer(): Promise<void> {
         if (!this.settings.enableTimeboxing) return;
 
-        const currentData = (await this.loadData()) as PluginData | null;
-        const persisted = currentData?.activeSessionState;
+        const file = this.getSessionStateFile();
+        let persisted: PersistedActiveSession | null = null;
 
+        if (file) {
+            try {
+                const content = await this.app.vault.read(file);
+                persisted = JSON.parse(content);
+            } catch (e) {
+                console.warn("Canvas Player: Error reading sync file", e);
+                return;
+            }
+        }
+
+        // Case 1: Remote Deletion (File is gone)
         if (!persisted) {
-            // Persisted session disappeared. Only treat this as a remote "Stop" if we previously
-            // saw a persisted session owned by another device.
             const shouldClearLocal =
-                this.lastSeenHadPersistedSession &&
-                this.lastSeenPersistedOwnerDeviceId !== null &&
-                this.lastSeenPersistedOwnerDeviceId !== this.deviceId;
+                this.lastSeenHadPersistedSession ||
+                (this.activeSession && !await this.isOwnerOfCurrentSession());
 
             if (shouldClearLocal && this.activeSession) {
+                console.log("Canvas Player: Session file deleted remotely. Stopping local session.");
                 this.activeSession = null;
                 this.activeSessionMode = null;
                 this.sharedTimer.abort();
@@ -832,22 +805,19 @@ export class CanvasPlayerPlugin extends Plugin {
             return;
         }
 
-        // Track last-seen persisted session (used to detect remote clears later)
+        // Case 2: Remote Update (File exists)
         this.lastSeenHadPersistedSession = true;
         this.lastSeenPersistedOwnerDeviceId = persisted.ownerDeviceId ?? null;
 
-        // Check if this is newer than what we last applied
         if (persisted.updatedAtMs <= this.lastAppliedSessionStateTimestamp) {
-            return; // Already applied this version
+            return; 
         }
 
-        // If we're the owner, don't reload (we just wrote this)
         if (this.isOwnerOfPersistedSession(persisted)) {
             this.lastAppliedSessionStateTimestamp = persisted.updatedAtMs;
             return;
         }
 
-        // We're not the owner - reload the session state
         try {
             await this.restoreActiveSessionState();
             this.lastAppliedSessionStateTimestamp = persisted.updatedAtMs;
@@ -2022,13 +1992,10 @@ export class CanvasPlayerPlugin extends Plugin {
      */
     async stopActiveSession() {
         if (!this.activeSession) return;
-
+        
         // Check ownership before stopping (but allow if we're owner)
         if (!(await this.assertCanControlAsync())) return;
-
-        // 1. Indicate Busy State with a persistent notice
-        const saveNotice = new Notice("Stopping session... syncing changes...", 0); // 0 duration = persistent
-
+        
         try {
             // Save resume session before stopping
             await this.saveResumeSession(this.activeSession.rootCanvasFile.path, {
@@ -2042,10 +2009,10 @@ export class CanvasPlayerPlugin extends Plugin {
                     state: { ...frame.state }
                 }))
             });
-
+            
             // Stopping should NOT affect node averages
             this.abortTimerForActiveSession();
-
+            
             // Clean up camera mode if active
             if (this.cameraModeView) {
                 // Unsubscribe camera mode timer
@@ -2059,23 +2026,19 @@ export class CanvasPlayerPlugin extends Plugin {
                 this.removeSpotlight();
                 this.cameraModeView = null;
             }
-
+            
             // Clean up
             this.sharedTimer.abort();
             this.activeSession = null;
             this.activeSessionMode = null;
             this.activeModal = null;
 
-            // Clear persisted active session state
+            // Clear persisted active session state (Deletes the vault file for instant sync)
             await this.clearActiveSessionState();
-
-            // 2. Small buffer to allow FS flush/Sync pickup
-            // This ensures the write hits the disk before we tell the user it's safe to exit
-            await new Promise(resolve => setTimeout(resolve, 500));
-
+            
             // Update UI
             this.updateStatusBar();
-
+            
             // Refresh mini view to show empty state
             const miniLeaves = this.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
             miniLeaves.forEach(leaf => {
@@ -2083,12 +2046,9 @@ export class CanvasPlayerPlugin extends Plugin {
                 miniView.refresh();
             });
 
-            // 3. Clear busy state
-            saveNotice.hide();
             new Notice("Session stopped.");
 
         } catch (e) {
-            saveNotice.hide();
             console.error(e);
             new Notice("Error stopping session.");
         }
