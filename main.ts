@@ -479,7 +479,7 @@ export class CanvasPlayerPlugin extends Plugin {
 
     /**
      * Save the current active session state to a vault file.
-     * Uses file creation/modification for faster sync signaling.
+     * Uses "Delete + Create" strategy to force instant syncing for every step.
      */
     private async saveActiveSessionState(forceOwnership: boolean = false): Promise<void> {
         // If timeboxing disabled or no session, ensure file is gone
@@ -531,13 +531,14 @@ export class CanvasPlayerPlugin extends Plugin {
 
         const jsonContent = JSON.stringify(persisted, null, 2);
 
-        // Write to vault file
+        // NUCLEAR SAVE: Delete then Create to force instant sync
         try {
             if (file) {
-                await this.app.vault.modify(file, jsonContent);
-            } else {
-                await this.app.vault.create("canvas-session-state.json", jsonContent);
+                await this.app.vault.delete(file);
             }
+            // Create immediately recreates it
+            await this.app.vault.create("canvas-session-state.json", jsonContent);
+            
             this.lastAppliedSessionStateTimestamp = now;
         } catch (e) {
             console.error("Canvas Player: Failed to write session file", e);
@@ -771,7 +772,17 @@ export class CanvasPlayerPlugin extends Plugin {
     private async reloadSessionStateIfNewer(): Promise<void> {
         if (!this.settings.enableTimeboxing) return;
 
-        const file = this.getSessionStateFile();
+        let file = this.getSessionStateFile();
+        
+        // --- GRACE PERIOD LOGIC ---
+        // If file is missing, wait 1s and check again. 
+        // This handles the "Delete+Create" update strategy without killing the session.
+        if (!file) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            file = this.getSessionStateFile(); // Check again
+        }
+        // ---------------------------
+
         let persisted: PersistedActiveSession | null = null;
 
         if (file) {
@@ -784,7 +795,7 @@ export class CanvasPlayerPlugin extends Plugin {
             }
         }
 
-        // Case 1: Remote Deletion (File is gone)
+        // Case 1: Remote Deletion (File is truly gone after grace period)
         if (!persisted) {
             const shouldClearLocal =
                 this.lastSeenHadPersistedSession ||
