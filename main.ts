@@ -29,10 +29,8 @@ export class CanvasPlayerPlugin extends Plugin {
 
     // Timer state for Camera Mode (legacy, deprecated - camera mode now uses activeSession and sharedTimer)
     // Kept for backward compatibility but no longer used in active code paths
-    cameraTimer: NodeTimerController | null = null;
     currentCanvasFile: TFile | null = null;
     currentCanvasData: CanvasData | null = null;
-    currentNodeForTimer: CanvasNode | null = null;
 
     // Resume session tracking
     private rootCanvasFile: TFile | null = null; // Track root canvas for saving resume position
@@ -479,7 +477,8 @@ export class CanvasPlayerPlugin extends Plugin {
 
     /**
      * Save the current active session state to a vault file.
-     * Uses "Delete + Create" strategy to force instant syncing for every step.
+     * Uses "Delete + Create" strategy to force instant syncing for every step,
+     * with a fallback to Modify if creation fails.
      */
     private async saveActiveSessionState(forceOwnership: boolean = false): Promise<void> {
         // If timeboxing disabled or no session, ensure file is gone
@@ -541,7 +540,17 @@ export class CanvasPlayerPlugin extends Plugin {
             
             this.lastAppliedSessionStateTimestamp = now;
         } catch (e) {
-            console.error("Canvas Player: Failed to write session file", e);
+            console.warn("Canvas Player: Nuclear save failed (likely race condition). Attempting fallback modify.", e);
+            // Fallback: If delete/create failed, the file might exist now. Try to modify it.
+            const fallbackFile = this.getSessionStateFile();
+            if (fallbackFile) {
+                try {
+                    await this.app.vault.modify(fallbackFile, jsonContent);
+                    this.lastAppliedSessionStateTimestamp = now;
+                } catch (modifyError) {
+                    console.error("Canvas Player: Fallback save also failed.", modifyError);
+                }
+            }
         }
     }
 
@@ -568,8 +577,6 @@ export class CanvasPlayerPlugin extends Plugin {
 
     /**
      * Restore active session state from the vault file.
-     * Restores timer as running while the app was closed and opens mini view.
-     * Does not automatically open modal/HUD (treated as minimized by default).
      */
     private async restoreActiveSessionState(): Promise<boolean> {
         if (!this.settings.enableTimeboxing) return false;
@@ -588,27 +595,32 @@ export class CanvasPlayerPlugin extends Plugin {
 
         if (!persisted) return false;
 
+        // FIX: Create a const reference to satisfy TypeScript inside the .find() callback
+        const savedSession = persisted;
+
         try {
-            const rootFile = this.app.vault.getAbstractFileByPath(persisted.rootFilePath);
+            const rootFile = this.app.vault.getAbstractFileByPath(savedSession.rootFilePath);
             if (!(rootFile instanceof TFile) || rootFile.extension !== 'canvas') {
-                throw new Error(`Root canvas file not found: ${persisted.rootFilePath}`);
+                throw new Error(`Root canvas file not found: ${savedSession.rootFilePath}`);
             }
-            const currentFile = this.app.vault.getAbstractFileByPath(persisted.currentFilePath);
+            const currentFile = this.app.vault.getAbstractFileByPath(savedSession.currentFilePath);
             if (!(currentFile instanceof TFile) || currentFile.extension !== 'canvas') {
-                throw new Error(`Current canvas file not found: ${persisted.currentFilePath}`);
+                throw new Error(`Current canvas file not found: ${savedSession.currentFilePath}`);
             }
 
             const content = await this.app.vault.read(currentFile);
             const canvasData: CanvasData = JSON.parse(content);
-            const currentNode = canvasData.nodes.find(n => n.id === persisted.currentNodeId);
+            
+            // Usage in closure is now safe because savedSession is const
+            const currentNode = canvasData.nodes.find(n => n.id === savedSession.currentNodeId);
             if (!currentNode) {
-                throw new Error(`Node not found: ${persisted.currentNodeId}`);
+                throw new Error(`Node not found: ${savedSession.currentNodeId}`);
             }
 
-            const stack = await restoreStackFromResume(this.app, persisted.stack);
+            const stack = await restoreStackFromResume(this.app, savedSession.stack);
 
             const history: CanvasNode[] = [];
-            for (const nodeId of persisted.historyNodeIds) {
+            for (const nodeId of savedSession.historyNodeIds) {
                 const node = canvasData.nodes.find(n => n.id === nodeId);
                 if (node) history.push(node);
             }
@@ -618,24 +630,24 @@ export class CanvasPlayerPlugin extends Plugin {
                 currentCanvasFile: currentFile,
                 currentCanvasData: canvasData,
                 currentNode,
-                state: { ...persisted.state },
+                state: { ...savedSession.state },
                 stack,
                 history,
-                timerDurationMs: persisted.timerDurationMs,
-                timerStartTimeMs: persisted.timerStartTimeMs
+                timerDurationMs: savedSession.timerDurationMs,
+                timerStartTimeMs: savedSession.timerStartTimeMs
             };
-            this.activeSessionMode = persisted.mode;
+            this.activeSessionMode = savedSession.mode;
 
             // Handle legacy ownership
-            if (!persisted.ownerDeviceId) {
+            if (!savedSession.ownerDeviceId) {
                  this.lastAppliedSessionStateTimestamp = Date.now();
             } else {
-                this.lastAppliedSessionStateTimestamp = persisted.updatedAtMs || Date.now();
+                this.lastAppliedSessionStateTimestamp = savedSession.updatedAtMs || Date.now();
             }
 
             // Restore running timer
-            const mode: 'countdown' | 'countup' = persisted.timerDurationMs > 0 ? 'countdown' : 'countup';
-            this.sharedTimer.restoreFromPersisted(persisted.timerStartTimeMs, persisted.timerDurationMs, mode);
+            const mode: 'countdown' | 'countup' = savedSession.timerDurationMs > 0 ? 'countdown' : 'countup';
+            this.sharedTimer.restoreFromPersisted(savedSession.timerStartTimeMs, savedSession.timerDurationMs, mode);
 
             this.updateStatusBar();
             await this.ensureMiniViewOpen();
@@ -1192,78 +1204,6 @@ export class CanvasPlayerPlugin extends Plugin {
         const choicesContainer = hudEl.createDiv({ cls: 'canvas-hud-choices' });
 
         this.renderChoicesInHud(view, data, currentNode, choicesContainer);
-    }
-
-    /**
-     * @deprecated Legacy timer method - camera mode now uses activeSession and sharedTimer.
-     * Kept for backward compatibility but no longer used.
-     */
-    async startTimerForNode(view: ItemView, data: CanvasData, node: CanvasNode, timerEl: HTMLElement) {
-        // Only start timer if timeboxing is enabled
-        if (!this.settings.enableTimeboxing) {
-            return;
-        }
-
-        // Abort any existing timer
-        if (this.cameraTimer) {
-            this.cameraTimer.abort();
-            this.cameraTimer = null;
-        }
-
-        // Load timing data for this node
-        const canvasFile = (view as any).file;
-        if (!canvasFile) return;
-
-        const timingData = await loadTimingForNode(this.app, canvasFile, node, data);
-        // Legacy method: use countdown if timing exists, otherwise use a default (5 min) for backward compatibility
-        // Note: This is deprecated - new code uses startTimerForActiveSession
-        const defaultMs = 5 * 60 * 1000; // 5 minutes fallback for legacy code
-        const initialMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : defaultMs;
-
-        // Create and start timer
-        this.cameraTimer = new NodeTimerController();
-        this.cameraTimer.start(initialMs, timerEl);
-    }
-
-    /**
-     * @deprecated Legacy timer method - camera mode now uses activeSession and sharedTimer.
-     * Kept for backward compatibility but no longer used.
-     */
-    async finishTimerForCurrentNode(): Promise<void> {
-        // Only finish timer if timeboxing is enabled
-        if (!this.settings.enableTimeboxing || !this.cameraTimer || !this.currentCanvasFile || !this.currentCanvasData || !this.currentNodeForTimer) {
-            return;
-        }
-
-        const elapsedMs = this.cameraTimer.finish();
-
-        // Load existing timing or start fresh
-        const existingTiming = await loadTimingForNode(
-            this.app,
-            this.currentCanvasFile,
-            this.currentNodeForTimer,
-            this.currentCanvasData
-        );
-
-        // Update timing using robust average (even in deprecated method for consistency)
-        const newTiming = updateRobustAverage(existingTiming, elapsedMs);
-
-        // Save timing back
-        const canvasNeedsSave = await saveTimingForNode(
-            this.app,
-            this.currentCanvasFile,
-            this.currentNodeForTimer,
-            this.currentCanvasData,
-            newTiming
-        );
-
-        // If canvas needs save (text nodes or fallback), write it
-        if (canvasNeedsSave && this.currentCanvasFile) {
-            const content = JSON.stringify(this.currentCanvasData, null, 2);
-            await this.app.vault.modify(this.currentCanvasFile, content);
-        }
-
-        this.cameraTimer = null;
     }
 
     async stopCameraMode() {
