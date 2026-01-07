@@ -973,24 +973,42 @@ export class CanvasPlayerPlugin extends Plugin {
 
     async playFromNode(contextNode: any) {
         // Get the node ID from the context menu node
-        // The node structure may vary, so check multiple possible properties
         const nodeId = contextNode?.id || contextNode?.node?.id || contextNode?.getData?.()?.id;
+        
         if (!nodeId) {
             console.error('Canvas Player: Could not extract node ID from context node', contextNode);
             new Notice('Could not identify the selected card.');
             return;
         }
 
-        // Get the active canvas file
-        const activeFile = this.app.workspace.getActiveFile();
-        if (!activeFile || activeFile.extension !== 'canvas') {
+        // --- FIX START ---
+        // Determine the correct Canvas file.
+        // 1. Try to get it directly from the node's parent canvas view (Internal API)
+        let canvasFile = contextNode?.canvas?.view?.file || contextNode?.node?.canvas?.view?.file;
+
+        // 2. If that fails, check if the currently active view is a Canvas
+        if (!canvasFile) {
+            const view = this.app.workspace.getActiveViewOfType(ItemView);
+            if (view && view.getViewType() === 'canvas') {
+                canvasFile = (view as any).file;
+            }
+        }
+
+        // 3. Fallback: Use the standard active file (works for Text cards)
+        if (!canvasFile) {
+             canvasFile = this.app.workspace.getActiveFile();
+        }
+
+        // Validate we actually found a canvas
+        if (!canvasFile || canvasFile.extension !== 'canvas') {
             new Notice('Please open a Canvas file first.');
             return;
         }
+        // --- FIX END ---
 
         try {
             // Load canvas data
-            const content = await this.app.vault.read(activeFile);
+            const content = await this.app.vault.read(canvasFile);
             const canvasData: CanvasData = JSON.parse(content);
 
             // Find the matching node in the canvas data
@@ -1000,13 +1018,13 @@ export class CanvasPlayerPlugin extends Plugin {
                 return;
             }
 
-            // Only allow playing from text nodes
+            // Only allow playing from text nodes or file nodes
             if (matchingNode.type !== 'text' && matchingNode.type !== 'file') {
                 new Notice('Can only play from text or file cards.');
                 return;
             }
 
-            await this.playCanvasFromNode(activeFile, canvasData, matchingNode);
+            await this.playCanvasFromNode(canvasFile, canvasData, matchingNode);
         } catch (error) {
             console.error('Canvas Player: failed to play from node', error);
             new Notice('Unable to play from the selected card.');
@@ -2200,7 +2218,7 @@ export class CanvasPlayerPlugin extends Plugin {
      * Finish and save timer for current node in active session.
      * Awards points if this is not the first completion (calibration).
      */
-    private async finishTimerForActiveSession() {
+    async finishTimerForActiveSession() {
         if (!this.activeSession || !this.settings.enableTimeboxing || !this.sharedTimer.isRunning()) {
             return;
         }
@@ -2657,10 +2675,14 @@ class CanvasPlayerModal extends Modal {
                     })
                     .buttonEl.addClass('mod-cta');
             } else {
-                new ButtonComponent(buttonContainer).setButtonText("End of Path").onClick(async () => {
-                    await this.plugin.stopActiveSession();
-                    this.close();
-                });
+                new ButtonComponent(buttonContainer)
+                    .setButtonText("End of Path")
+                    .onClick(async () => {
+                        // FIX: Finish timer to register completion/rewards before stopping
+                        await this.plugin.finishTimerForActiveSession();
+                        await this.plugin.stopActiveSession();
+                        this.close();
+                    });
             }
         } else {
             validChoices.forEach(choice => {
