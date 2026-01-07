@@ -1038,25 +1038,37 @@ export class CanvasPlayerPlugin extends Plugin {
             this.rootCanvasFile = canvasFile;
         }
 
-        if (this.settings.mode === 'modal') {
-            // Create active session for modal mode
-            const rootFile = this.rootCanvasFile ?? canvasFile;
-            let timerDurationMs = 0;
+        let timerDurationMs = 0;
+        if (this.settings.enableTimeboxing) {
+            const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
+            timerDurationMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : 0;
+        }
 
-            if (this.settings.enableTimeboxing) {
-                const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
-                timerDurationMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : 0;
+        // Create the session
+        this.activeSession = createActiveSession(
+            this.rootCanvasFile ?? canvasFile,
+            canvasFile,
+            canvasData,
+            startNode,
+            initialState,
+            initialStack,
+            timerDurationMs
+        );
+
+        // --- FIX BUG 2: Auto-dive if starting directly on a nested canvas file ---
+        if (startNode.type === 'file' && startNode.file && startNode.file.endsWith('.canvas')) {
+            await this.diveIntoCanvasForSession(startNode);
+            // If in camera mode, we must physically open the new file so the view matches the session
+            if (this.settings.mode === 'camera') {
+                const leaf = this.app.workspace.getLeaf(false);
+                if (leaf) {
+                    await leaf.openFile(this.activeSession.currentCanvasFile);
+                }
             }
+        }
+        // -------------------------------------------------------------------------
 
-            this.activeSession = createActiveSession(
-                rootFile,
-                canvasFile,
-                canvasData,
-                startNode,
-                initialState,
-                initialStack,
-                timerDurationMs
-            );
+        if (this.settings.mode === 'modal') {
             this.activeSessionMode = 'modal';
 
             // Start shared timer if timeboxing is enabled
@@ -1064,49 +1076,26 @@ export class CanvasPlayerPlugin extends Plugin {
                 await this.startTimerForActiveSession();
             }
 
-            // Update status bar
             this.updateStatusBar();
-
-            // Auto-open mini view
             await this.ensureMiniViewOpen();
 
-            // Open modal
-            const modal = new CanvasPlayerModal(this, canvasFile, canvasData, startNode, initialState, initialStack, rootFile);
+            // Open modal using the (possibly updated) session data
+            const session = this.activeSession;
+            const modal = new CanvasPlayerModal(this, session.currentCanvasFile, session.currentCanvasData, session.currentNode, session.state, session.stack, session.rootCanvasFile);
             this.activeModal = modal;
             modal.open();
         } else {
-            // For camera mode, create active session (similar to modal mode)
-            const rootFile = this.rootCanvasFile ?? canvasFile;
-            let timerDurationMs = 0;
-
-            if (this.settings.enableTimeboxing) {
-                const timingData = await loadTimingForNode(this.app, canvasFile, startNode, canvasData);
-                timerDurationMs = timingData && timingData.avgMs > 0 ? timingData.avgMs : 0;
-            }
-
-            this.activeSession = createActiveSession(
-                rootFile,
-                canvasFile,
-                canvasData,
-                startNode,
-                initialState,
-                initialStack,
-                timerDurationMs
-            );
             this.activeSessionMode = 'camera';
 
-            // Start shared timer if timeboxing is enabled
             if (this.settings.enableTimeboxing) {
                 await this.startTimerForActiveSession();
             }
 
-            // Update status bar
             this.updateStatusBar();
-
-            // Auto-open mini view
             await this.ensureMiniViewOpen();
 
-            await this.startCameraMode(canvasData, startNode);
+            // Start camera mode using the (possibly updated) session data
+            await this.startCameraMode(this.activeSession.currentCanvasData, this.activeSession.currentNode);
         }
     }
 
@@ -1520,17 +1509,58 @@ export class CanvasPlayerPlugin extends Plugin {
             await this.startTimerForActiveSession();
         }
 
-        // Restore HUD at the node we left off (the File node)
+        // --- FIX BUG 1: Auto-advance for Camera Mode ---
+        const edges = frame.data.edges.filter(e => e.fromNode === frame.currentNode.id);
+        if (edges.length === 1) {
+            const edge = edges[0];
+            const nextNode = frame.data.nodes.find(n => n.id === edge.toNode);
+            if (nextNode) {
+                const parsed = LogicEngine.parseLabel(edge.label || "");
+                if (LogicEngine.checkConditions(parsed, this.activeSession.state)) {
+                    
+                    // Logic update
+                    LogicEngine.updateState(parsed, this.activeSession.state);
+
+                    // Handle diving if the NEXT node is ALSO a canvas (nested-nested)
+                    if (nextNode.type === 'file' && nextNode.file && nextNode.file.endsWith('.canvas')) {
+                         await this.diveIntoCanvas(view, frame.data, nextNode);
+                         return;
+                    }
+
+                    // Otherwise, move to next node
+                    this.activeSession.currentNode = nextNode;
+                    
+                    // Finish timer for the parent node we just skipped
+                    await this.finishTimerForActiveSession();
+                    // Start timer for the new node
+                    if (this.settings.enableTimeboxing) {
+                        await this.startTimerForActiveSession();
+                    }
+
+                    await this.createHud(view, frame.data, nextNode);
+                    this.zoomToNode(view, nextNode);
+                    requestAnimationFrame(() => {
+                        setTimeout(async () => {
+                            await this.applySpotlight(view, nextNode);
+                        }, 300);
+                    });
+                    await this.updateAllUIs();
+                    return;
+                }
+            }
+        }
+        // -----------------------------------------------
+
+        // Restore HUD at the node we left off
         await this.createHud(view, frame.data, frame.currentNode);
 
         // Zoom to that node
         this.zoomToNode(view, frame.currentNode);
-        // Clear previous focused node since we're returning to a different canvas
         this.currentFocusedNodeEl = null;
         requestAnimationFrame(() => {
             setTimeout(async () => {
                 await this.applySpotlight(view, frame.currentNode);
-            }, 300); // Reduced delay - blur stays active
+            }, 300); 
         });
 
         // Update mini view
@@ -2111,19 +2141,46 @@ export class CanvasPlayerPlugin extends Plugin {
             return;
         }
 
-        // Restore parent context
-        this.activeSession.currentCanvasFile = frame.file;
-        this.activeSession.currentCanvasData = frame.data;
-        this.activeSession.currentNode = frame.currentNode;
-        this.activeSession.state = frame.state;
-        this.activeSession.history = [];
+        // Restore parent context using a stable local reference
+        const session = this.activeSession;
+        if (!session) {
+            await this.stopActiveSession();
+            return;
+        }
+
+        session.currentCanvasFile = frame.file;
+        session.currentCanvasData = frame.data;
+        session.currentNode = frame.currentNode;
+        session.state = frame.state;
+        session.history = [];
 
         // Start timer for restored node
         if (this.settings.enableTimeboxing) {
             await this.startTimerForActiveSession();
         }
 
-        // Update UI
+        // --- FIX BUG 1: Auto-advance if there is only one path forward ---
+        // This skips the "Nested Canvas: ..." placeholder screen
+        if (session.currentCanvasData && session.currentNode) {
+            const edges = session.currentCanvasData.edges.filter(e => e.fromNode === session.currentNode.id);
+            if (edges.length === 1) {
+                const edge = edges[0];
+                const nextNode = session.currentCanvasData.nodes.find(n => n.id === edge.toNode);
+                
+                if (nextNode) {
+                    // Check if the edge has logic conditions
+                    const parsed = LogicEngine.parseLabel(edge.label ?? "");
+                    if (LogicEngine.checkConditions(parsed, session.state)) {
+                        // Auto-navigate to the next node immediately
+                        await this.navigateToNode(parsed, nextNode);
+                        return;
+                    }
+                }
+            }
+        }
+        // ----------------------------------------------------------------
+
+        // Update UI (only if we didn't auto-advance)
         await this.updateAllUIs();
     }
 
