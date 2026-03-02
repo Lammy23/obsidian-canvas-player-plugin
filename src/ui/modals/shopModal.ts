@@ -1,8 +1,8 @@
-import { Modal, Setting, ButtonComponent, Notice } from 'obsidian';
-import { CanvasPlayerPlugin } from './main';
-import { calculateBalance, recordSpend, equipSticker, isOwned, getEquippedStickerId } from './economy';
-import { SHOP_ITEMS } from './shopCatalog';
-import { CanvasPlayerMiniView, CANVAS_PLAYER_MINI_VIEW_TYPE } from './miniPlayerView';
+import { Modal, Setting, ButtonComponent, Notice, WorkspaceLeaf } from 'obsidian';
+import CanvasPlayerPlugin from '../../main';
+import { calculateBalance, recordSpend, equipSticker, isOwned, getEquippedStickerId } from '../../economy/economy';
+import { SHOP_ITEMS } from '../../economy/shopCatalog';
+import { CanvasPlayerMiniView, CANVAS_PLAYER_MINI_VIEW_TYPE } from '../views/miniPlayerView';
 
 /**
  * Shop modal for purchasing and equipping stickers.
@@ -130,7 +130,7 @@ export class CanvasPlayerShopModal extends Modal {
      */
     private refreshMiniView() {
         const miniLeaves = this.plugin.app.workspace.getLeavesOfType(CANVAS_PLAYER_MINI_VIEW_TYPE);
-        miniLeaves.forEach(leaf => {
+        miniLeaves.forEach((leaf: WorkspaceLeaf) => {
             const miniView = leaf.view as CanvasPlayerMiniView;
             void miniView.refresh();
         });

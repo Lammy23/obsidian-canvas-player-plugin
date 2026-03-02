@@ -1,5 +1,5 @@
 import { App, TFile } from 'obsidian';
-import { CanvasNode, CanvasData } from './types';
+import { CanvasNode, CanvasData } from '../types';
 import { TimingData } from './timeboxing';
 import { RobustTimingData, toRobustTimingData, toTimingData } from './timingStats';
 

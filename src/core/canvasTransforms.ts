@@ -1,5 +1,5 @@
 import { App, Notice, TFile } from 'obsidian';
-import { CanvasData, CanvasNode } from './types';
+import { CanvasData, CanvasNode } from '../types';
 
 /**
  * Extracts node ID and type from the context menu node object.
