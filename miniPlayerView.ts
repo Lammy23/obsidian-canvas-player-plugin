@@ -3,6 +3,10 @@ import { CanvasPlayerPlugin } from './main';
 import { LogicEngine } from './logic';
 import { formatRemainingTime } from './sharedCountdownTimer';
 import { ActiveSession } from './playerSession';
+import { getEquippedStickerId } from './economy';
+import { getShopItem } from './shopCatalog';
+import { calculateBalance } from './economy';
+import { CanvasPlayerShopModal } from './shopModal';
 
 export const CANVAS_PLAYER_MINI_VIEW_TYPE = 'canvas-player-mini';
 export const CANVAS_PLAYER_MINI_VIEW_ICON = 'play-circle';
@@ -14,6 +18,9 @@ export class CanvasPlayerMiniView extends ItemView {
     private currentCanvasDisplay: HTMLElement | null = null;
     private currentNodeDisplay: HTMLElement | null = null;
     private contentContainer: HTMLElement | null = null;
+    private topbar: HTMLElement | null = null;
+    private pointsDisplay: HTMLElement | null = null;
+    private badgeDisplay: HTMLElement | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: CanvasPlayerPlugin) {
         super(leaf);
@@ -56,9 +63,21 @@ export class CanvasPlayerMiniView extends ItemView {
         this.contentContainer.empty();
 
         const session = this.plugin.activeSession;
+        
+        // Topbar: points on left, badge on right
+        this.topbar = this.contentContainer.createDiv({ cls: 'canvas-player-mini-topbar' });
+        this.pointsDisplay = this.topbar.createDiv({ cls: 'canvas-player-mini-points' });
+        this.updatePointsDisplay();
+        
+        this.badgeDisplay = this.topbar.createDiv({ cls: 'canvas-player-mini-badge' });
+        this.updateBadgeDisplay();
+
         if (!session) {
             const emptyEl = this.contentContainer.createDiv({ cls: 'canvas-player-mini-empty' });
             emptyEl.textContent = 'No active canvas player session.';
+            
+            // Add shop button even when no session
+            this.addShopButton();
             return;
         }
 
@@ -105,6 +124,9 @@ export class CanvasPlayerMiniView extends ItemView {
                     await this.plugin.restorePlayer();
                 });
         }
+
+        // Shop button at the bottom
+        this.addShopButton();
     }
 
     private updateNodeDisplay(session: ActiveSession) {
@@ -126,13 +148,46 @@ export class CanvasPlayerMiniView extends ItemView {
 
     private updateTimerDisplay(remainingMs: number) {
         if (!this.timerDisplay) return;
-        const formatted = formatRemainingTime(remainingMs);
+        const mode = this.plugin.sharedTimer.getMode();
+        const formatted = formatRemainingTime(remainingMs, mode);
         this.timerDisplay.setText(formatted);
-        if (remainingMs < 0) {
+        // Only show negative styling in countdown mode
+        if (mode === 'countdown' && remainingMs < 0) {
             this.timerDisplay.addClass('canvas-player-timer-negative');
         } else {
             this.timerDisplay.removeClass('canvas-player-timer-negative');
         }
+    }
+
+    private updatePointsDisplay() {
+        if (!this.pointsDisplay) return;
+        const balance = calculateBalance(this.plugin.economy);
+        this.pointsDisplay.setText(`Points: ${balance}`);
+    }
+
+    private updateBadgeDisplay() {
+        if (!this.badgeDisplay) return;
+        this.badgeDisplay.empty();
+        
+        const stickerId = getEquippedStickerId(this.plugin.economy);
+        const sticker = getShopItem(stickerId);
+        
+        if (sticker && sticker.emoji) {
+            this.badgeDisplay.textContent = sticker.emoji;
+            this.badgeDisplay.setAttribute('title', sticker.name);
+        }
+    }
+
+    private addShopButton() {
+        if (!this.contentContainer) return;
+        
+        const shopButtonContainer = this.contentContainer.createDiv({ cls: 'canvas-player-mini-shop-button-container' });
+        new ButtonComponent(shopButtonContainer)
+            .setButtonText('Open shop')
+            .setCta()
+            .onClick(() => {
+                new CanvasPlayerShopModal(this.plugin).open();
+            });
     }
 
     // Public method to trigger re-render (called by plugin when session changes)
@@ -148,6 +203,9 @@ export class CanvasPlayerMiniView extends ItemView {
                 this.updateTimerDisplay(remainingMs);
             });
         }
+        // Update points and badge in case they changed
+        this.updatePointsDisplay();
+        this.updateBadgeDisplay();
     }
 
     /**

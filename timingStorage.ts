@@ -1,23 +1,25 @@
 import { App, TFile } from 'obsidian';
 import { CanvasNode, CanvasData } from './types';
 import { TimingData } from './timeboxing';
+import { RobustTimingData, toRobustTimingData, toTimingData } from './timingStats';
 
 const TIMING_COMMENT_REGEX = /<!--\s*canvas-player:timing\s*(\{[^}]+\})\s*-->/;
 
 /**
  * Load timing data for a node.
  * Checks text node comments, markdown file comments, or node JSON property.
+ * Returns RobustTimingData (with history) if available, or null.
  */
 export async function loadTimingForNode(
     app: any,
     canvasFile: TFile,
     node: CanvasNode,
     canvasData: CanvasData
-): Promise<TimingData | null> {
+): Promise<RobustTimingData | null> {
     // 1. Text nodes: check for comment in node.text
     if (node.type === 'text' && node.text) {
         const timing = parseTimingFromText(node.text);
-        if (timing) return timing;
+        if (timing) return toRobustTimingData(timing);
     }
 
     // 2. File nodes linking to markdown: check linked file
@@ -27,7 +29,7 @@ export async function loadTimingForNode(
             if (linkedFile instanceof TFile) {
                 const content = await app.vault.read(linkedFile);
                 const timing = parseTimingFromText(content);
-                if (timing) return timing;
+                if (timing) return toRobustTimingData(timing);
             }
         } catch (e) {
             console.error('Failed to read linked file for timing', e);
@@ -38,7 +40,8 @@ export async function loadTimingForNode(
     if ((node as any).canvasPlayerTiming) {
         const prop = (node as any).canvasPlayerTiming;
         if (typeof prop.avgMs === 'number' && typeof prop.samples === 'number') {
-            return { avgMs: prop.avgMs, samples: prop.samples };
+            const timing: TimingData = { avgMs: prop.avgMs, samples: prop.samples };
+            return toRobustTimingData(timing);
         }
     }
 
@@ -49,22 +52,32 @@ export async function loadTimingForNode(
  * Save timing data for a node.
  * Updates text node comments, markdown file comments, or node JSON property.
  * Returns true if the canvas file needs to be saved.
+ * 
+ * Note: Only stores TimingData (avgMs, samples) in comments for compatibility.
+ * History is stored in the node JSON property if available.
  */
 export async function saveTimingForNode(
     app: any,
     canvasFile: TFile,
     node: CanvasNode,
     canvasData: CanvasData,
-    timing: TimingData
+    timing: RobustTimingData
 ): Promise<boolean> {
     let canvasNeedsSave = false;
 
+    // Convert to TimingData for storage (comments only store avgMs/samples)
+    const timingData = toTimingData(timing);
+
     // 1. Text nodes: update comment in node.text
     if (node.type === 'text' && node.text !== undefined) {
-        const updatedText = updateTimingInText(node.text, timing);
+        const updatedText = updateTimingInText(node.text, timingData);
         if (updatedText !== node.text) {
             node.text = updatedText;
             canvasNeedsSave = true;
+        }
+        // Also store full robust data in node property if available
+        if ((node as any).canvasPlayerTiming) {
+            (node as any).canvasPlayerTiming = timing;
         }
         return canvasNeedsSave;
     }
@@ -75,7 +88,7 @@ export async function saveTimingForNode(
             const linkedFile = app.metadataCache.getFirstLinkpathDest(node.file, canvasFile.path);
             if (linkedFile instanceof TFile) {
                 const content = await app.vault.read(linkedFile);
-                const updatedContent = updateTimingInText(content, timing);
+                const updatedContent = updateTimingInText(content, timingData);
                 if (updatedContent !== content) {
                     await app.vault.modify(linkedFile, updatedContent);
                 }
@@ -87,6 +100,7 @@ export async function saveTimingForNode(
     }
 
     // 3. Fallback: store as node JSON property (for groups, canvas links, non-markdown files)
+    // Store full robust data here
     (node as any).canvasPlayerTiming = timing;
     return true; // Canvas needs to be saved
 }

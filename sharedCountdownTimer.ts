@@ -3,21 +3,25 @@ import { Component } from 'obsidian';
 /**
  * Shared countdown timer that can survive UI changes.
  * Provides per-second updates to subscribers.
+ * Supports both countdown and count-up modes.
  */
 export class SharedCountdownTimer extends Component {
     private startTimeMs: number | null = null;
     private initialDurationMs: number = 0;
+    private mode: 'countdown' | 'countup' = 'countdown';
     private intervalId: number | null = null;
     private subscribers: Set<(remainingMs: number) => void> = new Set();
 
     /**
      * Start the timer with the given initial duration.
-     * @param initialDurationMs The countdown duration in milliseconds
+     * @param initialDurationMs The countdown duration in milliseconds (or ignored in count-up mode)
+     * @param mode 'countdown' (default) or 'countup'
      */
-    start(initialDurationMs: number): void {
+    start(initialDurationMs: number, mode: 'countdown' | 'countup' = 'countdown'): void {
         this.abort(); // Clean up any existing timer
         
         this.initialDurationMs = initialDurationMs;
+        this.mode = mode;
         this.startTimeMs = Date.now();
         
         // Initial update
@@ -33,9 +37,10 @@ export class SharedCountdownTimer extends Component {
      * Restore a previously-running timer from persisted wall-clock timestamps.
      * This will resume 1s ticking and update subscribers.
      */
-    restoreFromPersisted(timerStartTimeMs: number, timerDurationMs: number): void {
+    restoreFromPersisted(timerStartTimeMs: number, timerDurationMs: number, mode: 'countdown' | 'countup' = 'countdown'): void {
         this.abort(); // Clean up any existing timer
         this.initialDurationMs = timerDurationMs;
+        this.mode = mode;
         this.startTimeMs = timerStartTimeMs;
 
         // Initial update
@@ -79,14 +84,25 @@ export class SharedCountdownTimer extends Component {
     }
 
     /**
-     * Get the current remaining time in milliseconds (can be negative).
+     * Get the current remaining time in milliseconds (can be negative for countdown).
+     * For count-up mode, returns elapsed time (always positive).
      */
     getRemainingMs(): number {
         if (this.startTimeMs === null) {
-            return this.initialDurationMs;
+            return this.mode === 'countup' ? 0 : this.initialDurationMs;
         }
         const elapsedMs = Date.now() - this.startTimeMs;
+        if (this.mode === 'countup') {
+            return elapsedMs;
+        }
         return this.initialDurationMs - elapsedMs;
+    }
+
+    /**
+     * Get the current timer mode.
+     */
+    getMode(): 'countdown' | 'countup' {
+        return this.mode;
     }
 
     /**
@@ -126,8 +142,17 @@ export class SharedCountdownTimer extends Component {
 
 /**
  * Format remaining time as mm:ss. Supports negative values (shows as -mm:ss).
+ * For count-up mode, always shows positive elapsed time.
  */
-export function formatRemainingTime(remainingMs: number): string {
+export function formatRemainingTime(remainingMs: number, mode: 'countdown' | 'countup' = 'countdown'): string {
+    if (mode === 'countup') {
+        // Count-up: always show positive elapsed time
+        const totalSeconds = Math.floor(remainingMs / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    // Countdown: can be negative
     const totalSeconds = Math.floor(Math.abs(remainingMs) / 1000);
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
