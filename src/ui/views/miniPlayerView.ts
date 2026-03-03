@@ -1,12 +1,12 @@
 import { ItemView, WorkspaceLeaf, ButtonComponent, Setting } from 'obsidian';
-import { CanvasPlayerPlugin } from './main';
-import { LogicEngine } from './logic';
-import { formatRemainingTime } from './sharedCountdownTimer';
-import { ActiveSession } from './playerSession';
-import { getEquippedStickerId } from './economy';
-import { getShopItem } from './shopCatalog';
-import { calculateBalance } from './economy';
-import { CanvasPlayerShopModal } from './shopModal';
+import CanvasPlayerPlugin from '../../main';
+import { LogicEngine } from '../../core/logic';
+import { formatRemainingTime } from '../../timeboxing/sharedCountdownTimer';
+import { ActiveSession } from '../../core/playerSession';
+import { getEquippedStickerId } from '../../economy/economy';
+import { getShopItem } from '../../economy/shopCatalog';
+import { calculateBalance } from '../../economy/economy';
+import { CanvasPlayerShopModal } from '../modals/shopModal';
 
 export const CANVAS_PLAYER_MINI_VIEW_TYPE = 'canvas-player-mini';
 export const CANVAS_PLAYER_MINI_VIEW_ICON = 'play-circle';
@@ -45,7 +45,7 @@ export class CanvasPlayerMiniView extends ItemView {
         
         // Subscribe to timer updates
         if (this.plugin.activeSession && this.plugin.settings.enableTimeboxing) {
-            this.timerUnsubscribe = this.plugin.sharedTimer.subscribe((remainingMs) => {
+            this.timerUnsubscribe = this.plugin.sharedTimer.subscribe((remainingMs: number) => {
                 this.updateTimerDisplay(remainingMs);
             });
         }
@@ -115,13 +115,13 @@ export class CanvasPlayerMiniView extends ItemView {
                 .onClick(async () => {
                     await this.plugin.takeOverSession();
                 });
-        } else if (this.plugin.isPlayerMinimized()) {
+        } else if (this.plugin.playbackManager.isPlayerMinimized()) {
             // Owner and minimized: show Restore button
             new ButtonComponent(actionsSection)
                 .setButtonText('Restore')
                 .setCta()
                 .onClick(async () => {
-                    await this.plugin.restorePlayer();
+                    await this.plugin.playbackManager.restorePlayer();
                 });
         }
 

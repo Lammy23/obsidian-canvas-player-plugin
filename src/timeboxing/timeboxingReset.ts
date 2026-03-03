@@ -1,5 +1,5 @@
 import { App, TFile, Notice } from 'obsidian';
-import { CanvasData, CanvasNode } from './types';
+import { CanvasData, CanvasNode } from '../types';
 
 const TIMING_COMMENT_REGEX = /<!--\s*canvas-player:timing\s*(\{[^}]+\})\s*-->/;
 

@@ -1,4 +1,4 @@
-import { getOrCreateDeviceId } from './deviceId';
+import { getOrCreateDeviceId } from '../utils/deviceId';
 
 /**
  * Transaction types in the economy system.

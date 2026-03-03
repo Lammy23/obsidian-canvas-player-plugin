@@ -1,5 +1,5 @@
 import { TFile } from 'obsidian';
-import { CanvasNode, CanvasData, StackFrame } from './types';
+import { CanvasNode, CanvasData, StackFrame } from '../types';
 import { GameState } from './logic';
 
 /**
